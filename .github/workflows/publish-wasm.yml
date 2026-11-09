@@ -1,11 +1,13 @@
-# Builds the wasm examples (WebGL vello_hybrid renderer) and uploads them as
-# the `blitz-wasm-demo` artifact. The latest successful run of this workflow
-# on a push to main is the published build: blitz-website fetches its artifact
-# through the GitHub API, as it does for the Publish Browser downloads.
+# Builds the Browser App (apps/browser) for the web (WebGL vello_hybrid
+# renderer) and uploads it as the `blitz-wasm-demo` artifact. The latest
+# successful run of this workflow on a push to main is the published build:
+# blitz-website fetches its artifact through the GitHub API, as it does for the
+# Publish Browser downloads.
 #
-# Artifact layout (each directory is a static site with relative URLs):
-#   todomvc/index.html, todomvc/todomvc-<hash>.js, todomvc/todomvc-<hash>_bg.wasm
-#   seven_guis/index.html, ...
+# The artifact is a static site with relative URLs: index.html plus assets/
+# (the wasm, its JS glue, and the browser's stylesheets and icons). Open
+# index.html?url=<page> to start on a page. Pages are fetched from the visitor's
+# browser, so only sites that allow cross-origin requests (CORS) load.
 name: Publish Wasm Demo
 on:
   push:
@@ -34,17 +36,21 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Trunk fetches the wasm-bindgen CLI matching Cargo.lock and wasm-opt
-      - name: Install Trunk
+      # dx fetches the wasm-bindgen CLI matching Cargo.lock
+      - name: Install Dioxus CLI
         uses: taiki-e/install-action@v2
         with:
-          tool: trunk@0.22.1
+          tool: dioxus-cli@0.8.0-alpha.3
 
-      - name: Build examples
+      - name: Build browser
         run: |
-          for app in todomvc seven_guis; do
-            (cd "examples/$app" && trunk build --release --locked --public-url ./ --dist "$GITHUB_WORKSPACE/wasm-demo/$app")
-          done
+          dx build --platform web --package browser --release --locked --no-default-features --features web-defaults
+          cp -r target/dx/blitz/release/web/public wasm-demo
+          # dx writes root-relative asset URLs (in index.html and the JS that
+          # loads the wasm); make them relative so the demo can be served from
+          # any path
+          sed -i 's#"/\./assets/#"./assets/#g' wasm-demo/index.html wasm-demo/assets/*.js
+          if grep -n '"/\./assets/' wasm-demo/index.html wasm-demo/assets/*.js; then exit 1; fi
           ls -lR wasm-demo
 
       - name: Upload wasm demo
