@@ -27,6 +27,7 @@ use blitz_traits::net::NetProvider;
 #[doc(inline)]
 pub use dioxus_native_dom::*;
 
+pub use assets::AssetHandler;
 use assets::DioxusNativeNetProvider;
 pub use dioxus_application::{DioxusNativeApplication, DioxusNativeEvent};
 pub use dioxus_renderer::{DioxusNativeWindowRenderer, RendererOptions};
@@ -148,6 +149,7 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
     }
 
     let mut config = config.unwrap_or_default();
+    let asset_handler = config.asset_handler.take();
     if let Some(window_attributes) = window_attributes {
         config.window_attributes = window_attributes;
     }
@@ -191,14 +193,21 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
         let inner_net_provider = Arc::new(blitz_net::Provider::new(net_waker));
         vdom.provide_root_context(Arc::clone(&inner_net_provider));
 
-        Arc::new(DioxusNativeNetProvider::with_inner(
-            proxy.clone(),
-            inner_net_provider as _,
-        )) as Arc<dyn NetProvider>
+        let provider = DioxusNativeNetProvider::with_inner(proxy.clone(), inner_net_provider as _);
+        Arc::new(match asset_handler {
+            Some(handler) => provider.with_asset_handler(handler),
+            None => provider,
+        }) as Arc<dyn NetProvider>
     };
 
     #[cfg(any(not(feature = "net"), target_arch = "wasm32"))]
-    let net_provider = DioxusNativeNetProvider::shared(proxy.clone());
+    let net_provider = {
+        let provider = DioxusNativeNetProvider::new(proxy.clone());
+        Arc::new(match asset_handler {
+            Some(handler) => provider.with_asset_handler(handler),
+            None => provider,
+        }) as Arc<dyn blitz_traits::net::NetProvider>
+    };
 
     vdom.provide_root_context(Arc::clone(&net_provider));
 

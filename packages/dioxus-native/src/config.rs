@@ -5,6 +5,7 @@ use peniko::Color;
 use winit::window::WindowAttributes;
 
 use crate::KeyboardShortcut;
+use crate::assets::AssetHandler;
 
 /// Launch-time configuration for a dioxus-native application.
 pub struct Config {
@@ -14,6 +15,7 @@ pub struct Config {
     pub(crate) base_color: Option<Color>,
     #[cfg_attr(not(feature = "devtools"), allow(dead_code))]
     pub(crate) devtools_shortcuts: Vec<KeyboardShortcut>,
+    pub(crate) asset_handler: Option<AssetHandler>,
 }
 
 impl LaunchConfig for Config {}
@@ -47,6 +49,7 @@ impl Default for Config {
             } else {
                 Vec::new()
             },
+            asset_handler: None,
         }
     }
 }
@@ -69,6 +72,19 @@ impl Config {
     /// the common one-font case.
     pub fn with_font_ctx(mut self, font_ctx: FontContext) -> Self {
         self.font_ctx = Some(font_ctx);
+        self
+    }
+
+    /// Serve `dioxus://` requests from `handler` before the bundled asset files.
+    ///
+    /// The handler receives the URL path, such as `/symbol/heart.png`, and returns the
+    /// response body, or `None` to fall back to the asset files. It runs on the thread
+    /// that loads the document's resources.
+    pub fn with_asset_handler(
+        mut self,
+        handler: impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
+        self.asset_handler = Some(std::sync::Arc::new(handler));
         self
     }
 
