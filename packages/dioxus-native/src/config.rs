@@ -78,8 +78,8 @@ impl Config {
     /// Serve `dioxus://` requests from `handler` before the bundled asset files.
     ///
     /// The handler receives the URL path, such as `/symbol/heart.png`, and returns the
-    /// response body, or `None` to fall back to the asset files. Each request runs on a
-    /// thread of its own, so a slow handler doesn't block the document.
+    /// response body, or `None` to fall back to the asset files. Requests run on a few
+    /// worker threads, so a slow handler doesn't block the document.
     pub fn with_asset_handler(
         mut self,
         handler: impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static,
