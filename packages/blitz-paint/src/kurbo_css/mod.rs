@@ -6,6 +6,7 @@
 //! Can I just say, this is a lot of work for a border
 //! HTML/css is annoyingly wild
 
+use anyrender::glass::CornerStyle;
 use kurbo::{Insets, Vec2};
 
 mod corner_curve;
@@ -75,5 +76,73 @@ fn get_corner_insets(insets: Insets, corner: Corner) -> Vec2 {
             x: insets.x1,
             y: insets.y1,
         },
+    }
+}
+
+/// The corner style a glass shape drawn over `css_box` takes.
+///
+/// `--corner-style: continuous` comes first, as it overrides `corner-shape`. Then any corner
+/// that isn't round makes it a superellipse, with K clamped to [-8, 8].
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "glass shapes read it once blitz-paint emits glass"
+    )
+)]
+pub(crate) fn corner_style(css_box: &CssBox) -> CornerStyle {
+    let curves = css_box.corner_curves;
+    if curves.contains(&CornerCurve::Continuous) {
+        return CornerStyle::Continuous;
+    }
+    if css_box.has_round_corners() {
+        return CornerStyle::Circular;
+    }
+    CornerStyle::Superellipse(curves.map(|curve| match curve {
+        CornerCurve::Superellipse(k) => k.clamp(-8.0, 8.0),
+        CornerCurve::Round | CornerCurve::Continuous => 1.0,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kurbo::Rect;
+
+    fn css_box(curves: [CornerCurve; 4]) -> CssBox {
+        let radius = Vec2::new(10.0, 10.0);
+        let radii = NonUniformRoundedRectRadii {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        };
+        CssBox::new(
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            Insets::ZERO,
+            Insets::ZERO,
+            0.0,
+            radii,
+        )
+        .with_corner_curves(curves)
+    }
+
+    #[test]
+    fn corner_style_prefers_continuous() {
+        use CornerCurve::*;
+        assert_eq!(corner_style(&css_box([Round; 4])), CornerStyle::Circular);
+        assert_eq!(
+            corner_style(&css_box([Continuous; 4])),
+            CornerStyle::Continuous
+        );
+        assert_eq!(
+            corner_style(&css_box([
+                Superellipse(2.0),
+                Round,
+                Superellipse(f32::INFINITY),
+                Superellipse(f32::NEG_INFINITY),
+            ])),
+            CornerStyle::Superellipse([2.0, 1.0, 8.0, -8.0])
+        );
     }
 }

@@ -21,6 +21,7 @@ use crate::sizing::compute_object_fit;
 use crate::text::{DrawTextContext, TextPaintOptions};
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
 use anyrender::{PaintScene, Scene};
+use blitz_dom::glass::CornerStyleProp;
 use blitz_dom::node::{
     ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
     TextNodeData,
@@ -759,7 +760,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // todo: maybe cache this so we don't need to constantly be figuring it out
         // It is quite a bit of math to calculate during render/traverse
         // Also! we can cache the bezpaths themselves, saving us a bunch of work
-        let frame = create_css_rect(&style, &layout, scale);
+        let continuous = node.corner_style() == Some(CornerStyleProp::Continuous);
+        let frame = create_css_rect(&style, &layout, scale, continuous);
 
         let element = node.element_data().unwrap();
 
@@ -1437,7 +1439,14 @@ fn insets_from_taffy_rect(input: taffy::Rect<f64>) -> Insets {
 }
 
 /// Convert Stylo and Taffy types into Kurbo types
-fn create_css_rect(style: &ComputedValues, layout: &Layout, scale: f64) -> CssBox {
+///
+/// `continuous` is `--corner-style: continuous`, which overrides `corner-shape`.
+fn create_css_rect(
+    style: &ComputedValues,
+    layout: &Layout,
+    scale: f64,
+    continuous: bool,
+) -> CssBox {
     // Resolve and rescale
     // We have to scale since document pixels are not same same as rendered pixels
     let width: f64 = layout.size.width as f64;
@@ -1470,7 +1479,10 @@ fn create_css_rect(style: &ComputedValues, layout: &Layout, scale: f64) -> CssBo
         &s_border.corner_bottom_right_shape,
         &s_border.corner_bottom_left_shape,
     ]
-    .map(|shape| CornerCurve::from_superellipse(shape.k));
+    .map(|shape| match continuous {
+        true => CornerCurve::Continuous,
+        false => CornerCurve::from_superellipse(shape.k),
+    });
 
     CssBox::new(border_box, border, padding, outline_width, border_radii)
         .with_corner_curves(corner_curves)

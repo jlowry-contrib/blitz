@@ -1,7 +1,10 @@
 use kurbo::{Arc, BezPath, Insets, PathEl, Point, Rect, Shape as _, Vec2};
 use std::{f64::consts::FRAC_PI_2, f64::consts::PI};
 
-use super::corner_curve::{CornerCurve, CornerFrame, CornerHalves, superellipse_corner};
+use super::corner_curve::{
+    CornerCurve, CornerFrame, CornerHalves, continuous_blends, continuous_corner,
+    superellipse_corner,
+};
 use super::non_uniform_radii::NonUniformRoundedRectRadii;
 use super::{Corner, CssBoxKind, Direction, Edge, add_insets, get_corner_insets};
 
@@ -239,11 +242,11 @@ impl CssBox {
         let target = self.border_box - insets;
         let mut path = BezPath::new();
         for corner in [TopLeft, TopRight, BottomRight, BottomLeft] {
-            let k = match self.corner_curve(corner) {
-                CornerCurve::Round => 1.0,
-                CornerCurve::Superellipse(k) => k,
+            let halves = match self.corner_curve(corner) {
+                CornerCurve::Round => superellipse_corner(1.0, &self.corner_frame(corner, insets)),
+                _ => self.shaped_corner_at(corner, insets),
             };
-            match superellipse_corner(k, &self.corner_frame(corner, insets)) {
+            match halves {
                 Some((first, second)) => {
                     path.insert_path(first);
                     path.insert_path(second);
@@ -356,13 +359,7 @@ impl CssBox {
 
     /// The curve of a corner.
     fn corner_curve(&self, corner: Corner) -> CornerCurve {
-        let index = match corner {
-            Corner::TopLeft => 0,
-            Corner::TopRight => 1,
-            Corner::BottomRight => 2,
-            Corner::BottomLeft => 3,
-        };
-        self.corner_curves[index]
+        self.corner_curves[corner_index(corner)]
     }
 
     /// The whole curve of a corner, starting with a `MoveTo`.
@@ -399,26 +396,59 @@ impl CssBox {
             CssBoxKind::PaddingBox => self.border_width,
             CssBoxKind::ContentBox => add_insets(self.border_width, self.padding_width),
         };
+        self.shaped_corner_at(corner, insets)
+    }
+
+    /// The two clockwise halves of a shaped corner of the contour `insets` inside the
+    /// border box, or `None` where it is sharp.
+    fn shaped_corner_at(&self, corner: Corner, insets: Insets) -> Option<CornerHalves> {
         match self.corner_curve(corner) {
             CornerCurve::Round => None,
             CornerCurve::Superellipse(k) => {
                 superellipse_corner(k, &self.corner_frame(corner, insets))
             }
+            CornerCurve::Continuous => {
+                use Corner::*;
+                let target = self.border_box - insets;
+                let radii = [TopLeft, TopRight, BottomRight, BottomLeft].map(|c| {
+                    let r = self.corner_radius(c);
+                    let (ix, iy) = self.adjusted_insets(c, insets);
+                    Vec2::new((r.x - ix).max(0.0), (r.y - iy).max(0.0))
+                });
+                let index = corner_index(corner);
+                let radius = radii[index];
+                if radius.x <= 0.0 || radius.y <= 0.0 {
+                    return None;
+                }
+                let blend = continuous_blends(target.size(), radii)[index];
+                let frame = self.corner_frame(corner, insets);
+                // The radius along an edge direction: rx horizontally, ry vertically.
+                let reach = |v: Vec2| v * if v.x != 0.0 { radius.x } else { radius.y };
+                Some(continuous_corner(
+                    blend,
+                    frame.target_outer,
+                    reach(frame.v3),
+                    reach(frame.v2),
+                ))
+            }
         }
     }
 
-    /// A corner of the contour `insets` inside the border box, as css-borders-4's
-    /// border contour path sets it up.
-    fn corner_frame(&self, corner: Corner, insets: Insets) -> CornerFrame {
-        let target = self.border_box - insets;
-        let size = self.border_box.size();
-        let radius = match corner {
+    /// The border radius of a corner.
+    fn corner_radius(&self, corner: Corner) -> Vec2 {
+        match corner {
             Corner::TopLeft => self.border_radii.top_left,
             Corner::TopRight => self.border_radii.top_right,
             Corner::BottomRight => self.border_radii.bottom_right,
             Corner::BottomLeft => self.border_radii.bottom_left,
-        };
-        // The spec's adjusted inset: the radius less its outset-adjusted radius.
+        }
+    }
+
+    /// css-borders-4's adjusted inset of a corner: its radius less the radius
+    /// outset-adjusted by `-insets`, per axis.
+    fn adjusted_insets(&self, corner: Corner, insets: Insets) -> (f64, f64) {
+        let size = self.border_box.size();
+        let radius = self.corner_radius(corner);
         let coverage = 2.0 * (radius.x / size.width).min(radius.y / size.height);
         let adjusted = |r: f64, inset: f64| {
             let outset = -inset;
@@ -431,10 +461,18 @@ impl CssBox {
             r - adjusted_radius
         };
         let corner_insets = get_corner_insets(insets, corner);
-        let (ix, iy) = (
+        (
             adjusted(radius.x, corner_insets.x),
             adjusted(radius.y, corner_insets.y),
-        );
+        )
+    }
+
+    /// A corner of the contour `insets` inside the border box, as css-borders-4's
+    /// border contour path sets it up.
+    fn corner_frame(&self, corner: Corner, insets: Insets) -> CornerFrame {
+        let target = self.border_box - insets;
+        let radius = self.corner_radius(corner);
+        let (ix, iy) = self.adjusted_insets(corner, insets);
         let outer = rect_corner(target, corner);
         let frame = |start_radius, end_radius, start_inset, end_inset, v3, v2| CornerFrame {
             start_radius,
@@ -739,6 +777,16 @@ impl CssBox {
     fn start_angle(&self, corner: Corner, radii: Vec2) -> f64 {
         let corner_insets = get_corner_insets(self.border_width, corner);
         start_angle(corner_insets.y, corner_insets.x, radii)
+    }
+}
+
+/// A corner's index in `CssBox::corner_curves`.
+fn corner_index(corner: Corner) -> usize {
+    match corner {
+        Corner::TopLeft => 0,
+        Corner::TopRight => 1,
+        Corner::BottomRight => 2,
+        Corner::BottomLeft => 3,
     }
 }
 

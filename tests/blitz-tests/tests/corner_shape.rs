@@ -78,3 +78,24 @@ fn box_shadow_follows_the_corner_shape() {
     assert!(covers(&spread, Point::new(8.0, 8.0)));
     assert!(covers(&spread, Point::new(-5.0, 50.0)));
 }
+
+#[test]
+fn continuous_corner_style_overrides_the_corner_shape() {
+    let (shadow, background) = shadow_and_background("#f00 6px 6px 0; --corner-style: continuous");
+    assert_eq!(shadow, background);
+
+    // The top edge runs between the continuous corners' extents, 1.52866483 r
+    // in from each end, where a bevel's would stop at r.
+    let extent = 1.52866483 * 20.0;
+    let ends: Vec<Point> = background
+        .elements()
+        .iter()
+        .filter_map(|el| el.end_point())
+        .filter(|p| p.y.abs() < 1e-9)
+        .collect();
+    assert!(
+        ends.iter().any(|p| (p.x - extent).abs() < 1e-6),
+        "top edge ends: {ends:?}"
+    );
+    assert!(ends.iter().any(|p| (p.x - (100.0 - extent)).abs() < 1e-6));
+}

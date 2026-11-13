@@ -184,6 +184,19 @@ impl GlassProps {
     }
 }
 
+/// Reads only `--corner-style`, as [`GlassProps::read`] reads it.
+pub fn read_corner_style(
+    style: &ComputedValues,
+    parent: Option<&ComputedValues>,
+) -> Option<CornerStyleProp> {
+    let mut r = Reader {
+        style,
+        parent,
+        invalid: SmallVec::new(),
+    };
+    r.read(Prop::CornerStyle, parse_corner_style)
+}
+
 /// Whether `style` has a `--glass` other than `none` of its own, not inherited from `parent`.
 pub(crate) fn has_glass(style: &ComputedValues, parent: Option<&ComputedValues>) -> bool {
     let mut r = Reader {

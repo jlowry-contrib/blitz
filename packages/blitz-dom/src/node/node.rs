@@ -1168,6 +1168,13 @@ impl Node {
         ))
     }
 
+    /// The node's `--corner-style`, or `None` when it has none or no styles.
+    pub fn corner_style(&self) -> Option<crate::glass::CornerStyleProp> {
+        let style = self.primary_styles()?;
+        let parent = self.parent_primary_styles();
+        crate::glass::read_corner_style(&style, parent.as_deref().map(|s| &**s))
+    }
+
     /// A lazy Taffy style backed by this node's primary stylo style.
     ///
     /// Panics if the node has no computed styles: layout always runs after

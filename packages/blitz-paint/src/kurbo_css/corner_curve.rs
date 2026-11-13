@@ -1,14 +1,23 @@
 //! The curves a box corner can follow, as `corner-shape` sets them.
 
 use kurbo::{
-    BezPath, CurveFitSample, Line, ParamCurve, ParamCurveFit, PathSeg, Point, Vec2, fit_to_bezpath,
+    BezPath, CubicBez, CurveFitSample, Line, ParamCurve, ParamCurveFit, PathSeg, Point, Size, Vec2,
+    fit_to_bezpath,
 };
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 use std::ops::Range;
+use std::sync::LazyLock;
 
 /// The largest |K| drawn as a curve; a larger finite K draws as this one.
 ///
 /// At 2^8 the curve is within a few thousandths of the radius of a square corner.
 const MAX_K: f32 = 8.0;
+
+/// How far a continuous corner reaches along each edge, per unit radius.
+///
+/// From PaintCode's construction of the iOS 7 rounded rect,
+/// <https://www.paintcodeapp.com/news/code-for-ios-7-rounded-rectangles>.
+const CONTINUOUS_EXTENT: f64 = 1.52866483;
 
 /// How far a fitted cubic may stray from the true curve, in device px.
 ///
@@ -22,6 +31,8 @@ pub enum CornerCurve {
     Round,
     /// `corner-shape: superellipse(K)`, with K in [-8, 8] or infinite.
     Superellipse(f32),
+    /// A continuous-curvature corner, as `--corner-style: continuous` asks for.
+    Continuous,
 }
 
 impl CornerCurve {
@@ -176,6 +187,135 @@ pub(crate) fn halves(k: f32, corner: Point, along: Vec2, across: Vec2) -> Corner
     let second = half_corner(k, corner, across, along).reverse_subpaths();
     (first, second)
 }
+
+/// How far each continuous corner of a box blends towards a circular one, from 0
+/// (fully continuous) to 1 (circular), in the order top-left, top-right,
+/// bottom-right, bottom-left.
+///
+/// A side shorter than its corners' extents would need blends both its corners
+/// towards circular, which they reach once the side is no longer than their radii.
+pub(crate) fn continuous_blends(size: Size, radii: [Vec2; 4]) -> [f64; 4] {
+    let [tl, tr, br, bl] = radii;
+    let blend = |side: f64, a: f64, b: f64| {
+        let ratio = side / (a + b);
+        if ratio.is_nan() {
+            return 0.0;
+        }
+        ((CONTINUOUS_EXTENT - ratio) / (CONTINUOUS_EXTENT - 1.0)).clamp(0.0, 1.0)
+    };
+    let top = blend(size.width, tl.x, tr.x);
+    let bottom = blend(size.width, bl.x, br.x);
+    let left = blend(size.height, tl.y, bl.y);
+    let right = blend(size.height, tr.y, br.y);
+    [
+        top.max(left),
+        top.max(right),
+        bottom.max(right),
+        bottom.max(left),
+    ]
+}
+
+/// A continuous corner at the box corner `corner`, from `corner + along` to
+/// `corner + across` once each is scaled by the corner's extent.
+///
+/// `along` and `across` are one radius long. `blend` moves it from fully
+/// continuous (0) to the round corner (1), as [`continuous_blends`] sets it.
+pub(crate) fn continuous_corner(
+    blend: f64,
+    corner: Point,
+    along: Vec2,
+    across: Vec2,
+) -> CornerHalves {
+    let (continuous, circular) = &*CONTINUOUS_CUBICS;
+    let map = |i: usize, j: usize| {
+        let p = continuous[i][j].lerp(circular[i][j], blend);
+        corner + along * p.x + across * p.y
+    };
+    let cubic = |i: usize| CubicBez::new(map(i, 0), map(i, 1), map(i, 2), map(i, 3));
+    let (first, middle, last) = (cubic(0), cubic(1), cubic(2));
+
+    let mut a = BezPath::new();
+    a.move_to(first.p0);
+    a.curve_to(first.p1, first.p2, first.p3);
+    let middle_start = middle.subsegment(0.0..0.5);
+    a.curve_to(middle_start.p1, middle_start.p2, middle_start.p3);
+    let mut b = BezPath::new();
+    let middle_end = middle.subsegment(0.5..1.0);
+    b.move_to(middle_end.p0);
+    b.curve_to(middle_end.p1, middle_end.p2, middle_end.p3);
+    b.curve_to(last.p1, last.p2, last.p3);
+    (a, b)
+}
+
+/// The control points of three cubics in a row.
+type ThreeCubics = [[Point; 4]; 3];
+
+/// The three cubics of a continuous corner and of a round one, per unit radius,
+/// as (along, across) offsets from the box corner.
+///
+/// The round corner is split where its handles keep the continuous corner's
+/// ratio, so the blend of the two stays tangent continuous.
+static CONTINUOUS_CUBICS: LazyLock<(ThreeCubics, ThreeCubics)> = LazyLock::new(|| {
+    let swap = |p: Point| Point::new(p.y, p.x);
+    let mirror = |c: [Point; 4]| [swap(c[3]), swap(c[2]), swap(c[1]), swap(c[0])];
+
+    // PaintCode's construction of the iOS 7 rounded rect, for the corner's first
+    // third and the start of its middle, per unit radius:
+    // <https://www.paintcodeapp.com/news/code-for-ios-7-rounded-rectangles>
+    let edge_handle = Point::new(1.08849323, 0.0);
+    let inner_handle = Point::new(0.86840689, 0.0);
+    let first_end = Point::new(0.66993427, 0.06549600);
+    let middle_start = Point::new(0.63149399, 0.07491100);
+    let middle_handle = Point::new(0.37282392, 0.16905899);
+    // PaintCode joins its first and middle cubics with a short line, turning
+    // the tangent by a few degrees at each end. Both cubics meet instead at
+    // the line's midpoint, along the line between their handles, which keep
+    // their lengths; the curve moves by under 0.007 radius.
+    let joint = first_end.midpoint(middle_start);
+    let direction = (middle_handle - inner_handle).normalize();
+    let handle_in = (first_end - inner_handle).hypot();
+    let handle_out = (middle_handle - middle_start).hypot();
+    let out = joint + direction * handle_out;
+    let first = [
+        Point::new(CONTINUOUS_EXTENT, 0.0),
+        edge_handle,
+        joint - direction * handle_in,
+        joint,
+    ];
+    let continuous = [first, [joint, out, swap(out), swap(joint)], mirror(first)];
+
+    // The quarter circle about (1, 1), cut at `split` from each end, where
+    // tan(split / 4) / tan((π/2 - 2·split) / 4) equals handle_in / handle_out.
+    let ratio = handle_in / handle_out;
+    let (mut low, mut high) = (0.0, FRAC_PI_4);
+    for _ in 0..64 {
+        let split = 0.5 * (low + high);
+        if (split / 4.0).tan() / ((FRAC_PI_2 - 2.0 * split) / 4.0).tan() < ratio {
+            low = split;
+        } else {
+            high = split;
+        }
+    }
+    let split = 0.5 * (low + high);
+    let at = |theta: f64| Point::new(1.0 + theta.cos(), 1.0 + theta.sin());
+    let tangent = |theta: f64| Vec2::new(-theta.sin(), theta.cos());
+    let arc = |from: f64, to: f64| {
+        let handle = 4.0 / 3.0 * ((to - from) / 4.0).tan();
+        [
+            at(from),
+            at(from) + tangent(from) * handle,
+            at(to) - tangent(to) * handle,
+            at(to),
+        ]
+    };
+    let (start, end) = (-FRAC_PI_2, -PI);
+    let circular = [
+        arc(start, start - split),
+        arc(start - split, end + split),
+        arc(end + split, end),
+    ];
+    (continuous, circular)
+});
 
 /// css-borders-4's normalized superellipse half corner.
 fn normalized_half_corner(k: f32) -> f64 {
@@ -416,7 +556,9 @@ fn segment_line_intersection(a0: Point, a1: Point, b0: Point, b1: Point) -> Opti
 mod tests {
     use super::*;
     use crate::kurbo_css::{CssBox, Edge, NonUniformRoundedRectRadii};
-    use kurbo::{Arc, Insets, ParamCurve, PathEl, Point, Rect, Shape, Vec2};
+    use kurbo::{
+        Arc, Insets, ParamCurve, ParamCurveArclen, PathEl, PathSeg, Point, Rect, Shape, Vec2,
+    };
     use std::f64::consts::{FRAC_PI_2, PI};
 
     const R: f64 = 50.0;
@@ -548,6 +690,98 @@ mod tests {
                 assert!(all_points(&border).contains(&Point::new(R, R)));
                 assert!(!border.contains(Point::new(R / 2.0, R / 2.0)));
                 assert!(border.contains(Point::new(R + 1.0, R + 1.0)));
+            }
+        }
+    }
+
+    fn continuous_box(width: f64) -> CssBox {
+        CssBox::new(
+            Rect::new(0.0, 0.0, width, 400.0),
+            Insets::uniform(4.0),
+            Insets::ZERO,
+            0.0,
+            radii(R),
+        )
+        .with_corner_curves([CornerCurve::Continuous; 4])
+    }
+
+    #[test]
+    fn continuous_corner_starts_at_its_extent() {
+        let path = continuous_box(400.0).border_box_path();
+        let extent = 1.52866483 * R;
+        let ends = path.elements().iter().filter_map(|el| el.end_point());
+        let top: Vec<f64> = ends.filter(|p| p.y.abs() < 1e-9).map(|p| p.x).collect();
+        let first = top.iter().copied().fold(f64::INFINITY, f64::min);
+        let last = top.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!((first - extent).abs() < 1e-6, "top edge starts at {first}");
+        assert!(
+            (last - (400.0 - extent)).abs() < 1e-6,
+            "top edge ends at {last}"
+        );
+        // and nothing but the edge reaches it
+        for p in samples(&path) {
+            if p.y < 1e-9 {
+                assert!(
+                    p.x >= extent - 1e-6 && p.x <= 400.0 - extent + 1e-6,
+                    "{p:?}"
+                );
+            }
+        }
+    }
+
+    /// The largest turn of the tangent, in degrees, where one segment meets the next.
+    fn largest_turn(path: &BezPath) -> f64 {
+        // Joining lines of no length don't turn anything.
+        let segs: Vec<PathSeg> = path
+            .segments()
+            .filter(|seg| seg.arclen(1e-9) > 1e-9)
+            .collect();
+        segs.windows(2)
+            .map(|pair| {
+                // The first control point that differs from the end, as a renderer
+                // takes the tangent.
+                let tangent = |points: &[Point]| {
+                    points[1..]
+                        .iter()
+                        .map(|p| *p - points[0])
+                        .find(|v| v.hypot() > 1e-9)
+                        .unwrap_or(Vec2::ZERO)
+                };
+                let points = |seg: PathSeg| match seg {
+                    PathSeg::Line(l) => vec![l.p0, l.p1],
+                    PathSeg::Quad(q) => vec![q.p0, q.p1, q.p2],
+                    PathSeg::Cubic(c) => vec![c.p0, c.p1, c.p2, c.p3],
+                };
+                let mut before = points(pair[0]);
+                before.reverse();
+                let out = -tangent(&before);
+                let into = tangent(&points(pair[1]));
+                (out.cross(into)).atan2(out.dot(into)).abs().to_degrees()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn continuous_corner_is_tangent_continuous() {
+        // A long side draws the full corner, a shorter one a blend towards the circle.
+        for width in [400.0, 2.5 * R, 2.0 * R] {
+            let path = continuous_box(width).border_box_path();
+            let turn = largest_turn(&path);
+            assert!(
+                turn < 0.5,
+                "width {width}: the tangent turns {turn} degrees"
+            );
+        }
+    }
+
+    #[test]
+    fn continuous_corner_is_circular_on_short_sides() {
+        // At a side of 2r the corner is the quarter circle of the round corner.
+        let path = continuous_box(2.0 * R).border_box_path();
+        for p in samples(&path) {
+            if p.x < R && p.y < R {
+                let error = ((p - Point::new(R, R)).hypot() - R).abs();
+                assert!(error < 0.01, "{p:?} is {error} px off the circle");
             }
         }
     }
