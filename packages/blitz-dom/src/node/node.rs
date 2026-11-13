@@ -1158,6 +1158,16 @@ impl Node {
         self.tree().get(self.parent?)?.primary_styles()
     }
 
+    /// Whether this node has a `--glass` other than `none` of its own, a cheaper check than
+    /// [`Node::glass_props`].
+    pub fn has_glass(&self) -> bool {
+        let Some(style) = self.primary_styles() else {
+            return false;
+        };
+        let parent = self.parent_primary_styles();
+        crate::glass::has_glass(&style, parent.as_deref().map(|s| &**s))
+    }
+
     /// This node's glass custom properties, or `None` when it has no styles.
     pub fn glass_props(&self) -> Option<crate::glass::GlassProps> {
         let style = self.primary_styles()?;

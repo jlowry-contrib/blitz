@@ -313,3 +313,18 @@ fn press_and_materialize_are_clamped() {
         assert!(props.invalid.is_empty(), "registered: {registered}");
     }
 }
+
+#[test]
+fn union_none_is_no_union() {
+    for registered in [false, true] {
+        let none = props("--glass: regular; --glass-union: none", registered);
+        assert_eq!(none.union, None, "registered: {registered}");
+        assert!(none.invalid.is_empty(), "registered: {registered}");
+        let named = props("--glass: regular; --glass-union: bar", registered);
+        assert_eq!(
+            named.union,
+            Some(Atom::from("bar")),
+            "registered: {registered}"
+        );
+    }
+}

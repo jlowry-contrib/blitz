@@ -115,6 +115,9 @@ impl GlassProps {
     ///
     /// `parent` is the parent element's style. An unregistered value that `style` inherited
     /// from it reads as unset, since registered glass properties don't inherit.
+    ///
+    /// Unregistered, an element that redeclares exactly its parent's value may read as unset
+    /// too, because Stylo can keep the parent's shared value for an equal declaration.
     pub fn read(style: &ComputedValues, parent: Option<&ComputedValues>) -> Self {
         let mut r = Reader {
             style,

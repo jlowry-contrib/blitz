@@ -1104,6 +1104,7 @@ dependencies = [
  "keyboard-types",
  "kurbo",
  "markup5ever",
+ "peniko",
  "stylo",
  "taffy",
  "test-that",

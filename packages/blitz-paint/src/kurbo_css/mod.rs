@@ -83,13 +83,6 @@ fn get_corner_insets(insets: Insets, corner: Corner) -> Vec2 {
 ///
 /// `--corner-style: continuous` comes first, as it overrides `corner-shape`. Then any corner
 /// that isn't round makes it a superellipse, with K clamped to [-8, 8].
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "glass shapes read it once blitz-paint emits glass"
-    )
-)]
 pub(crate) fn corner_style(css_box: &CssBox) -> CornerStyle {
     let curves = css_box.corner_curves;
     if curves.contains(&CornerCurve::Continuous) {

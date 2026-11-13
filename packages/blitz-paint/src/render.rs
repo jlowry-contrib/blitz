@@ -3,11 +3,14 @@ mod border;
 mod box_shadow;
 mod clip_path;
 mod form_controls;
+mod glass;
 mod mask;
 
 use blitz_dom::CopyStyleGetters;
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(feature = "tracing")]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::kurbo_css::{CornerCurve, CssBox};
@@ -20,8 +23,9 @@ use crate::layers::LayerManager;
 use crate::sizing::compute_object_fit;
 use crate::text::{DrawTextContext, TextPaintOptions};
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
+use anyrender::glass::GlassGroup;
 use anyrender::{PaintScene, Scene};
-use blitz_dom::glass::CornerStyleProp;
+use blitz_dom::glass::{CornerStyleProp, GlassProps};
 use blitz_dom::node::{
     ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
     TextNodeData,
@@ -138,6 +142,13 @@ pub struct BlitzDomPainter<'dom, 'a> {
 
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
+
+    /// Glass nodes whose unparsable glass properties have been logged.
+    #[cfg(feature = "tracing")]
+    pub(crate) glass_invalid_logged: RefCell<HashSet<NodeId>>,
+    /// Glass nodes whose elliptical corners have been logged as rounded down.
+    #[cfg(feature = "tracing")]
+    pub(crate) glass_radii_logged: RefCell<HashSet<NodeId>>,
 }
 
 impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
@@ -176,7 +187,58 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             draw_text_context: RefCell::new(DrawTextContext::default()),
             selection_ranges,
             custom_widget_scenes,
+            #[cfg(feature = "tracing")]
+            glass_invalid_logged: RefCell::default(),
+            #[cfg(feature = "tracing")]
+            glass_radii_logged: RefCell::default(),
         }
+    }
+
+    /// The glass group of a lone glass element, whose border box is `frame`, if it draws one.
+    fn glass_group(
+        &self,
+        node_id: NodeId,
+        frame: &CssBox,
+        transform: Affine,
+        props: &GlassProps,
+    ) -> Option<GlassGroup> {
+        #[cfg(feature = "tracing")]
+        if !props.invalid.is_empty() && self.glass_invalid_logged.borrow_mut().insert(node_id) {
+            tracing::warn!(
+                name: "blitz.glass.unregistered",
+                node = %node_id,
+                properties = ?props.invalid,
+                "unregistered glass properties didn't parse and read as their defaults"
+            );
+        }
+        let shape = glass::glass_shape(frame, props, transform, self.scale, 0)?;
+        #[cfg(feature = "tracing")]
+        if matches!(shape.kind, anyrender::glass::ShapeKind::RoundedRect { .. })
+            && glass::has_elliptical_corner(frame)
+            && self.glass_radii_logged.borrow_mut().insert(node_id)
+        {
+            tracing::warn!(
+                name: "blitz.glass.elliptical_radii",
+                node = %node_id,
+                "glass takes the smaller radius of each elliptical corner"
+            );
+        }
+        Some(GlassGroup::new(vec![shape]).with_id(node_id.as_u64()))
+    }
+
+    /// Draws `group`, whose shapes are in CSS px.
+    fn draw_glass(&self, scene: &mut impl PaintScene, group: &GlassGroup) {
+        if scene.supports_glass() {
+            scene.draw_glass(group);
+            return;
+        }
+        // The tint fallback fills each shape under its own transform, in device px, with no
+        // glass backend to apply the document scale.
+        let mut group = group.clone();
+        for shape in &mut group.shapes {
+            shape.transform = Affine::scale(self.scale) * shape.transform;
+        }
+        scene.draw_glass(&group);
     }
 
     /// Draw the current tree to current render surface
@@ -585,6 +647,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         );
 
         let paints_own_box = !node.is_inline_with_only_block_children();
+        // Glass, when drawn, replaces the element's own backdrop-filter.
+        let glass_group = if paints_own_box && node.has_glass() {
+            node.glass_props()
+                .and_then(|props| self.glass_group(node_id, &cx.frame, cx.transform, &props))
+        } else {
+            None
+        };
 
         cx.draw_outline(scene);
         if paints_own_box {
@@ -610,7 +679,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 let unscrolled_transform = cx.transform;
 
                 let filter = convert_filters(&effects.filter.0).map(Arc::new);
-                let backdrop_filter = convert_filters(&effects.backdrop_filter.0).map(Arc::new);
+                let backdrop_filter = match glass_group {
+                    Some(_) => None,
+                    None => convert_filters(&effects.backdrop_filter.0).map(Arc::new),
+                };
 
                 // Adjust effect layer clip by filter expansion area
                 //
@@ -643,6 +715,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     filter,
                     backdrop_filter,
                     |scene| {
+                        if let Some(group) = &glass_group {
+                            self.draw_glass(scene, group);
+                        }
                         if paints_own_box {
                             cx.draw_background(scene);
                             cx.draw_inset_box_shadow(scene);
