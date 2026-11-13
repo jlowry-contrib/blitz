@@ -1369,6 +1369,10 @@ impl Node {
         if style.get_effects().mix_blend_mode != style::computed_values::mix_blend_mode::T::Normal {
             return true;
         }
+
+        if !style.get_effects().backdrop_filter.0.is_empty() {
+            return true;
+        }
         // TODO: contain
 
         false
