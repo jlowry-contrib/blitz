@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
-use anyrender::glass::{CornerStyle, GlassMaterial, GlassShape, GlassVariant, ShapeKind};
+use anyrender::glass::{
+    BackdropSource, CornerStyle, GlassMaterial, GlassShape, GlassVariant, ShapeKind,
+};
 use blitz_dom::glass::{GlassProps, GlassVariant as PropVariant};
-use kurbo::{Affine, Insets, Rect, RoundedRectRadii, Shape, Vec2};
+use kurbo::{Affine, BezPath, Ellipse, Insets, Rect, RoundedRect, RoundedRectRadii, Shape, Vec2};
 
 use super::clip_path::GlassClip;
 use crate::kurbo_css::{CssBox, NonUniformRoundedRectRadii, corner_style};
@@ -110,6 +112,52 @@ pub(crate) fn glass_shape(
     })
 }
 
+/// Tolerance, in CSS px, for flattening a shape's curves into its portal clip.
+const OUTLINE_TOLERANCE: f64 = 0.1;
+
+/// The outline of `kind`, in the shape's own coordinates, with continuous and superellipse
+/// corners drawn circular.
+pub(crate) fn shape_outline(kind: &ShapeKind) -> Option<BezPath> {
+    Some(match kind {
+        ShapeKind::RoundedRect { rect, radii, .. } => {
+            RoundedRect::from_rect(*rect, *radii).to_path(OUTLINE_TOLERANCE)
+        }
+        ShapeKind::Capsule(rect) => {
+            RoundedRect::from_rect(*rect, rect.width().min(rect.height()) / 2.0)
+                .to_path(OUTLINE_TOLERANCE)
+        }
+        ShapeKind::Ellipse(rect) => Ellipse::from_rect(*rect).to_path(OUTLINE_TOLERANCE),
+        ShapeKind::Path(path) => (**path).clone(),
+        _ => return None,
+    })
+}
+
+/// Whether `props` ask for a `Region` backdrop: a magnify other than 1 or a nonzero offset.
+pub(crate) fn has_region(props: &GlassProps) -> bool {
+    props.magnify != 1.0 || props.source_offset != (0.0, 0.0)
+}
+
+/// The `Region` backdrop of `shape`: its box, moved by `offset` in CSS px and scaled by
+/// `1 / magnify` about its centre, under the shape's transform.
+pub(crate) fn region_source(
+    shape: &GlassShape,
+    magnify: f32,
+    (dx, dy): (f32, f32),
+) -> Option<BackdropSource> {
+    let bounds = match &shape.kind {
+        ShapeKind::RoundedRect { rect, .. }
+        | ShapeKind::Capsule(rect)
+        | ShapeKind::Ellipse(rect) => *rect,
+        ShapeKind::Path(path) => path.bounding_box(),
+        _ => return None,
+    };
+    let moved = bounds + Vec2::new(f64::from(dx), f64::from(dy));
+    Some(BackdropSource::Region {
+        rect: Rect::from_center_size(moved.center(), moved.size() / f64::from(magnify)),
+        transform: shape.transform,
+    })
+}
+
 /// The used radii, after overlap scaling, in the order top-left, top-right, bottom-right,
 /// bottom-left, divided by `scale`.
 fn used_radii(frame: &CssBox, scale: f64) -> [Vec2; 4] {
@@ -169,4 +217,94 @@ fn rounded_rect(rect: Rect, radii: [Vec2; 4], corner: CornerStyle) -> (ShapeKind
         corner,
     };
     (kind, elliptical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(kind: ShapeKind, transform: Affine) -> GlassShape {
+        GlassShape::new(
+            0,
+            transform,
+            kind,
+            GlassMaterial::new(GlassVariant::Regular),
+        )
+    }
+
+    fn assert_rect_near(a: Rect, b: Rect) {
+        let d = [a.x0 - b.x0, a.y0 - b.y0, a.x1 - b.x1, a.y1 - b.y1];
+        assert!(d.iter().all(|d| d.abs() < 1e-9), "{a:?} != {b:?}");
+    }
+
+    const RECT: Rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+
+    #[test]
+    fn region_is_the_offset_box_scaled_about_its_centre() {
+        let transform = Affine::rotate(0.3).then_translate(Vec2::new(5.0, 7.0));
+        let rounded = shape(
+            ShapeKind::RoundedRect {
+                rect: RECT,
+                radii: RoundedRectRadii::from_single_radius(4.0),
+                corner: CornerStyle::Circular,
+            },
+            transform,
+        );
+        let Some(BackdropSource::Region { rect, transform: t }) =
+            region_source(&rounded, 2.0, (10.0, -10.0))
+        else {
+            panic!("no region");
+        };
+        assert_rect_near(rect, Rect::from_center_size((60.0, 10.0), (50.0, 20.0)));
+        assert_eq!(t, transform);
+
+        let path = shape(
+            ShapeKind::Path(Arc::new(Rect::new(10.0, 20.0, 30.0, 60.0).to_path(0.1))),
+            Affine::IDENTITY,
+        );
+        let Some(BackdropSource::Region { rect, .. }) = region_source(&path, 1.0, (5.0, 0.0))
+        else {
+            panic!("no region");
+        };
+        assert_rect_near(rect, Rect::new(15.0, 20.0, 35.0, 60.0));
+    }
+
+    #[test]
+    fn outlines_follow_each_kind() {
+        let capsule = shape_outline(&ShapeKind::Capsule(RECT)).unwrap();
+        assert_rect_near(capsule.bounding_box(), RECT);
+        assert!(!capsule.contains((1.0, 1.0).into()));
+        assert!(capsule.contains((20.0, 20.0).into()));
+        assert!(capsule.contains((50.0, 1.0).into()));
+
+        let ellipse = shape_outline(&ShapeKind::Ellipse(RECT)).unwrap();
+        assert_rect_near(ellipse.bounding_box(), RECT);
+        assert!(!ellipse.contains((10.0, 3.0).into()));
+        assert!(ellipse.contains((50.0, 20.0).into()));
+
+        let rounded = shape_outline(&ShapeKind::RoundedRect {
+            rect: RECT,
+            radii: RoundedRectRadii::from_single_radius(4.0),
+            corner: CornerStyle::Continuous,
+        })
+        .unwrap();
+        assert_rect_near(rounded.bounding_box(), RECT);
+        assert!(!rounded.contains((0.2, 0.2).into()));
+        assert!(rounded.contains((5.0, 1.0).into()));
+
+        let path = Rect::new(10.0, 20.0, 30.0, 60.0).to_path(0.1);
+        let outline = shape_outline(&ShapeKind::Path(Arc::new(path.clone()))).unwrap();
+        assert_eq!(outline, path);
+    }
+
+    #[test]
+    fn region_needs_a_magnify_or_an_offset() {
+        let mut props = GlassProps::default();
+        assert!(!has_region(&props));
+        props.magnify = 2.0;
+        assert!(has_region(&props));
+        props.magnify = 1.0;
+        props.source_offset = (0.0, 1.0);
+        assert!(has_region(&props));
+    }
 }

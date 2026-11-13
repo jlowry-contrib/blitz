@@ -33,6 +33,7 @@ mod fragment_navigation;
 mod frame_clock;
 mod frame_time;
 mod glass;
+mod glass_portal;
 mod glass_props;
 mod harness_render;
 mod harness_smoke;

@@ -75,8 +75,15 @@ pub struct GlassProps {
     /// The morph overrides; `Some` only when `--glass-w` and `--glass-h` are both positive.
     pub geometry: Option<GeometryOverride>,
     /// `--glass-source`, the `id` of the portal source; `None` for `none`.
+    ///
+    /// The source should establish a stacking context and a containing block (for example
+    /// `position: relative; isolation: isolate`), so that its positioned and z-indexed
+    /// descendants paint inside the portal's copy.
     pub source: Option<Atom>,
-    /// `--glass-source-hidden` other than 0.
+    /// `--glass-source-hidden` other than 0: the source paints only through its portals.
+    ///
+    /// A hidden source that is an ancestor of its own portal paints nowhere, as in UIKit. It is
+    /// still hit-testable, so authors add `pointer-events: none` to it.
     pub source_hidden: bool,
     /// `--glass-magnify`; 1 unless positive.
     pub magnify: f32,

@@ -7,6 +7,7 @@ mod glass;
 mod mask;
 
 use blitz_dom::CopyStyleGetters;
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use crate::layers::LayerManager;
 use crate::sizing::compute_object_fit;
 use crate::text::{DrawTextContext, TextPaintOptions};
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
-use anyrender::glass::{GlassGroup, GlassShape};
+use anyrender::glass::{BackdropSource, GlassGroup, GlassShape};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::glass::{CornerStyleProp, GlassProps};
 use blitz_dom::node::{
@@ -45,7 +46,7 @@ use style::{
     },
 };
 
-use kurbo::{self, Affine, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
+use kurbo::{self, Affine, BezPath, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
 use peniko::{self, BlendMode, Fill, ImageData, ImageSampler};
 use style::computed_values::isolation::T as Isolation;
 use style::values::generics::color::GenericColor;
@@ -143,6 +144,10 @@ pub struct BlitzDomPainter<'dom, 'a> {
 
     /// Glass nodes whose shape a glass container's group already draws this paint.
     pub(crate) glass_collected: RefCell<HashSet<NodeId>>,
+    /// Portal sources being re-painted, innermost last; a source on it paints nothing more.
+    pub(crate) glass_active_sources: RefCell<SmallVec<[NodeId; 4]>>,
+    /// Portal sources that `--glass-source-hidden` skips at their home position.
+    pub(crate) glass_hidden_sources: RefCell<HashSet<NodeId>>,
     /// Glass nodes whose unparsable glass properties have been logged.
     #[cfg(feature = "tracing")]
     pub(crate) glass_invalid_logged: RefCell<HashSet<NodeId>>,
@@ -152,6 +157,12 @@ pub struct BlitzDomPainter<'dom, 'a> {
     /// Glass nodes whose evenodd clip path has been logged as filled nonzero.
     #[cfg(feature = "tracing")]
     pub(crate) glass_fill_rule_logged: RefCell<HashSet<NodeId>>,
+    /// Glass nodes whose missing portal source has been logged.
+    #[cfg(feature = "tracing")]
+    pub(crate) glass_source_missing_logged: RefCell<HashSet<NodeId>>,
+    /// Glass nodes whose ignored source, magnify or offset has been logged.
+    #[cfg(feature = "tracing")]
+    pub(crate) glass_source_ignored_logged: RefCell<HashSet<NodeId>>,
 }
 
 impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
@@ -191,12 +202,18 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             selection_ranges,
             custom_widget_scenes,
             glass_collected: RefCell::default(),
+            glass_active_sources: RefCell::default(),
+            glass_hidden_sources: RefCell::default(),
             #[cfg(feature = "tracing")]
             glass_invalid_logged: RefCell::default(),
             #[cfg(feature = "tracing")]
             glass_radii_logged: RefCell::default(),
             #[cfg(feature = "tracing")]
             glass_fill_rule_logged: RefCell::default(),
+            #[cfg(feature = "tracing")]
+            glass_source_missing_logged: RefCell::default(),
+            #[cfg(feature = "tracing")]
+            glass_source_ignored_logged: RefCell::default(),
         }
     }
 
@@ -274,20 +291,31 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         }
 
         let mut members = Vec::new();
-        if let Some(props) = own_props
-            && let Some(shape) = self.glass_shape(node, frame, transform, &props, 0)
+        if let Some(props) = &own_props
+            && let Some(shape) = self.glass_shape(node, frame, transform, props, 0)
         {
-            members.push((shape, props.union));
+            members.push((shape, props.union.clone()));
         }
         let draws_own = !members.is_empty();
 
         let Some(spacing) = spacing else {
+            let mut own = group_of(members, node.id.as_u64(), 0.0);
+            let portal = match (&mut own, &own_props) {
+                (Some(group), Some(props)) => self.backdrop(node, props, group),
+                _ => None,
+            };
             return GlassGroups {
-                own: group_of(members, node.id.as_u64(), 0.0),
+                own,
                 inner: None,
                 draws_own,
+                portal,
             };
         };
+        if let Some(props) = &own_props
+            && draws_own
+        {
+            self.ignore_backdrop(node, props);
+        }
 
         let (own, mut members) = if clips_content {
             (group_of(members, node.id.as_u64(), 0.0), Vec::new())
@@ -304,14 +332,209 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 own,
                 inner: group_of(members, node.id.as_u64() | CLIPPED_MEMBERS_ID_BIT, spacing),
                 draws_own,
+                portal: None,
             }
         } else {
             GlassGroups {
                 own: group_of(members, node.id.as_u64(), spacing),
                 inner: None,
                 draws_own,
+                portal: None,
             }
         }
+    }
+
+    /// Sets the backdrop of `node`'s lone `group` from its `props`, and returns the portal
+    /// source to re-paint under it, if it has one.
+    ///
+    /// A `--glass-source` names the source by its `id`; an unknown id paints nothing, and a
+    /// magnify or offset beside it is ignored. Without one, a magnify other than 1 or an offset
+    /// other than 0 makes the backdrop a `Region`.
+    #[cfg_attr(
+        not(feature = "tracing"),
+        expect(unused_variables, reason = "only the logs read `node`")
+    )]
+    fn backdrop(&self, node: &Node, props: &GlassProps, group: &mut GlassGroup) -> Option<NodeId> {
+        if let Some(id) = &props.source {
+            let source = self.dom.get_element_by_id(id);
+            #[cfg(feature = "tracing")]
+            if source.is_none()
+                && self
+                    .glass_source_missing_logged
+                    .borrow_mut()
+                    .insert(node.id)
+            {
+                tracing::warn!(
+                    name: "blitz.glass.source_missing",
+                    node = %node.id,
+                    source = %id,
+                    "no element has the glass source's id, so the portal paints nothing"
+                );
+            }
+            #[cfg(feature = "tracing")]
+            if glass::has_region(props)
+                && self
+                    .glass_source_ignored_logged
+                    .borrow_mut()
+                    .insert(node.id)
+            {
+                tracing::warn!(
+                    name: "blitz.glass.source_ignored",
+                    node = %node.id,
+                    "a glass portal ignores its magnify and offset"
+                );
+            }
+            return source;
+        }
+        if glass::has_region(props)
+            && let Some(shape) = group.shapes.first()
+            && let Some(region) = glass::region_source(shape, props.magnify, props.source_offset)
+        {
+            group.source = region;
+        }
+        None
+    }
+
+    /// Logs that `node`'s glass, drawn in a container's group, ignores its portal source,
+    /// magnify and offset.
+    #[cfg_attr(
+        not(feature = "tracing"),
+        expect(unused_variables, reason = "only the logs read `node` and `props`")
+    )]
+    fn ignore_backdrop(&self, node: &Node, props: &GlassProps) {
+        #[cfg(feature = "tracing")]
+        if (props.source.is_some() || glass::has_region(props))
+            && self
+                .glass_source_ignored_logged
+                .borrow_mut()
+                .insert(node.id)
+        {
+            tracing::warn!(
+                name: "blitz.glass.source_ignored",
+                node = %node.id,
+                "glass in a container's group ignores its source, magnify and offset"
+            );
+        }
+    }
+
+    /// Re-paints `source` under `group`, whose element paints under `transform`, clipped to
+    /// the group's shapes, unless `source` is already being re-painted.
+    ///
+    /// The re-paint is content only: while it runs, no glass is drawn and no portal opens.
+    ///
+    /// The source's own layout offset is cancelled, so its border box lands on the glass
+    /// element's. `clip_rect` is the glass element's culling rectangle, in screen px.
+    fn draw_portal(
+        &self,
+        scene: &mut impl PaintScene,
+        group: &GlassGroup,
+        source: NodeId,
+        transform: Affine,
+        clip_rect: Rect,
+    ) {
+        if self.glass_active_sources.borrow().contains(&source) {
+            return;
+        }
+        let Some(node) = self.dom.as_ref().get_node(source) else {
+            return;
+        };
+        let location = node.final_layout().location;
+        let origin = Vec2::new(f64::from(location.x), f64::from(location.y)) * self.scale;
+        let source_transform = transform * Affine::translate(-origin);
+
+        let mut clip = BezPath::new();
+        for shape in &group.shapes {
+            if let Some(outline) = glass::shape_outline(&shape.kind) {
+                let to_device = Affine::scale(self.scale) * shape.transform;
+                clip.extend(&(to_device * outline));
+            }
+        }
+        let screen = Affine::translate((-self.initial_x, -self.initial_y));
+        let clip_rect = clip_rect.intersect(screen.transform_rect_bbox(clip.bounding_box()));
+
+        let pushed = self.layer_manager.maybe_push_layer(
+            scene,
+            true,
+            BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &clip,
+            None,
+            None,
+        );
+        // Past the layer limit there is no clip, and an unclipped copy would cover the page.
+        if !pushed {
+            return;
+        }
+        self.glass_active_sources.borrow_mut().push(source);
+        self.render_node(scene, source, source_transform, clip_rect);
+        self.glass_active_sources.borrow_mut().pop();
+        self.layer_manager.maybe_pop_layer(scene, pushed);
+    }
+
+    /// Whether `node`, with `styles`, is a hidden portal source or paints as part of one.
+    ///
+    /// A positioned or z-indexed descendant can paint outside its source's subtree, hoisted to
+    /// an outer stacking context or containing block, so it is hidden with its source.
+    fn hidden_at_home(&self, node: &Node, styles: &ComputedValues) -> bool {
+        use style::computed_values::position::T as Position;
+
+        let hidden = self.glass_hidden_sources.borrow();
+        if hidden.is_empty() {
+            return false;
+        }
+        if hidden.contains(&node.id) {
+            return true;
+        }
+        let escapes = styles.get_box().position != Position::Static
+            || !styles.get_position().z_index.is_auto();
+        let tree = self.dom.tree();
+        escapes
+            && std::iter::successors(node.parent, |&id| tree[id].parent)
+                .any(|id| hidden.contains(&id))
+    }
+
+    /// The portal sources that a glass element hides at their home position.
+    ///
+    /// It reads only glass properties and layout. Glass that never paints (`display: none`, a
+    /// zero-size box or a non-invertible transform) is left out, and so is glass that is a
+    /// container or has one as an ancestor: a group's glass ignores its source, so hiding it
+    /// would leave the source painted nowhere.
+    ///
+    /// A hidden source that is an ancestor of its own portal paints nowhere, as in UIKit. A
+    /// hidden source is still hit-testable, so authors add `pointer-events: none` to it.
+    fn hidden_sources(&self) -> HashSet<NodeId> {
+        let dom = self.dom;
+        let tree = dom.tree();
+        let in_container = |node: &Node| {
+            std::iter::successors(Some(node), |n| n.parent.map(|id| &tree[id]))
+                .any(|n| n.glass_container().is_some())
+        };
+        let paints = |node: &Node| {
+            let size = node.final_layout().size;
+            let det = node
+                .transform()
+                .as_deref()
+                .copied()
+                .unwrap_or_default()
+                .determinant();
+            !matches!(node.taffy_display(), taffy::Display::None)
+                && size.width > 0.0
+                && size.height > 0.0
+                && det != 0.0
+                && det.is_finite()
+        };
+        tree.iter()
+            .filter(|(_, node)| {
+                node.flags.is_in_document()
+                    && node.has_glass()
+                    && paints(node)
+                    && !in_container(node)
+            })
+            .filter_map(|(_, node)| node.glass_props())
+            .filter(|props| props.source_hidden)
+            .filter_map(|props| dom.get_element_by_id(props.source.as_deref()?))
+            .collect()
     }
 
     /// Adds the glass of `node_id`, painted under `parent_transform`, and of its paint subtree
@@ -360,6 +583,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             let frame = self.css_box(node, &styles, node.final_layout());
             let id = members.len() as u32;
             if let Some(shape) = self.glass_shape(node, &frame, transform, &props, id) {
+                self.ignore_backdrop(node, &props);
                 self.glass_collected.borrow_mut().insert(node_id);
                 members.push((shape, props.union));
                 collected = true;
@@ -466,6 +690,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         for shape in &mut group.shapes {
             shape.transform = Affine::scale(self.scale) * shape.transform;
         }
+        if let BackdropSource::Region { transform, .. } = &mut group.source {
+            *transform = Affine::scale(self.scale) * *transform;
+        }
         scene.draw_glass(&group);
     }
 
@@ -479,6 +706,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             return;
         }
         self.glass_collected.borrow_mut().clear();
+        self.glass_active_sources.borrow_mut().clear();
+        *self.glass_hidden_sources.borrow_mut() = self.hidden_sources();
 
         // Simply render the document (the root element (note that this is not the same as the root node)))
         // scene.reset();
@@ -716,6 +945,12 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             return;
         };
 
+        // A hidden portal source paints only through its portals.
+        let in_portal = !self.glass_active_sources.borrow().is_empty();
+        if !in_portal && self.hidden_at_home(node, &styles) {
+            return;
+        }
+
         // Hide inputs with type=hidden
         // Implemented here rather than using the style engine for performance reasons
         if node.local_name() == "input" && node.attr(local_name!("type")) == Some("hidden") {
@@ -878,9 +1113,15 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let paints_own_box = !node.is_inline_with_only_block_children();
         // Glass, when drawn, replaces the element's own backdrop-filter, whether this element
         // draws it or a container's group already does.
+        // A portal's copy is content only: no glass, and so no nested portals.
         let glass = if self.glass_collected.borrow().contains(&node_id) {
             GlassGroups {
                 draws_own: true,
+                ..GlassGroups::default()
+            }
+        } else if in_portal {
+            GlassGroups {
+                draws_own: paints_own_box && node.has_glass(),
                 ..GlassGroups::default()
             }
         } else {
@@ -948,6 +1189,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     backdrop_filter,
                     |scene| {
                         if let Some(group) = &glass.own {
+                            if let Some(source) = glass.portal {
+                                self.draw_portal(scene, group, source, cx.transform, clip_rect);
+                            }
                             self.draw_glass(scene, group);
                         }
                         if paints_own_box {
@@ -1110,6 +1354,8 @@ struct GlassGroups {
     inner: Option<GlassGroup>,
     /// Whether the element's own glass is drawn, by itself or by its container.
     draws_own: bool,
+    /// The portal source re-painted under `own`, for a lone glass element.
+    portal: Option<NodeId>,
 }
 
 /// The group of `members`, in order, with every pair that shares a union; `None` when empty.
