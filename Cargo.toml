@@ -313,9 +313,9 @@ vello_gpu = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo
 # the external pass hook, from branch glass-0.11 of jlowry-contrib/vello.
 # The crates it publishes together are patched from the same commit. Drop
 # once upstream Vello has an equivalent.
-vello = { git = "https://github.com/jlowry-contrib/vello", rev = "234433809d21ccc1ff7d2a6cc43a8a9188267512" }
-vello_encoding = { git = "https://github.com/jlowry-contrib/vello", rev = "234433809d21ccc1ff7d2a6cc43a8a9188267512" }
-vello_shaders = { git = "https://github.com/jlowry-contrib/vello", rev = "234433809d21ccc1ff7d2a6cc43a8a9188267512" }
+vello = { git = "https://github.com/jlowry-contrib/vello", rev = "555611aaf85785dd24cf5beafcd9f09f94addf7e" }
+vello_encoding = { git = "https://github.com/jlowry-contrib/vello", rev = "555611aaf85785dd24cf5beafcd9f09f94addf7e" }
+vello_shaders = { git = "https://github.com/jlowry-contrib/vello", rev = "555611aaf85785dd24cf5beafcd9f09f94addf7e" }
 
 # anyrender with glass groups and PaintScene::draw_glass, from branch glass
 # of jlowry-contrib/anyrender. Every anyrender crate in the graph is patched
