@@ -408,6 +408,11 @@ impl<Rend: WindowRenderer> View<Rend> {
             height + insets.top + insets.bottom,
         );
 
+        let time = self.scheduler.frame_time();
+        let scheme = inner.viewport().color_scheme;
+        self.scheduler
+            .run_hook(&mut self.renderer, time, scale, scheme);
+
         self.renderer.render(|scene| {
             paint_scene(
                 scene,

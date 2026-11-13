@@ -179,6 +179,13 @@ impl<D: Document + ?Sized, R: WindowRenderer> FrameScheduler<D, R> {
         self.frame_hook = hook;
     }
 
+    /// Calls the frame hook, if one is set, for a paint outside [`frame`](Self::frame).
+    pub fn run_hook(&mut self, renderer: &mut R, time: FrameTime, scale: f64, scheme: ColorScheme) {
+        if let Some(hook) = &mut self.frame_hook {
+            hook(renderer, time, scale, scheme);
+        }
+    }
+
     /// Returns whether steps are waiting for a frame.
     pub fn has_pending_steps(&self) -> bool {
         !self.steps.is_empty()
@@ -200,9 +207,9 @@ impl<D: Document + ?Sized, R: WindowRenderer> FrameScheduler<D, R> {
 
     /// Runs one frame: advances the clock, polls, resolves, flushes events, then paints.
     ///
-    /// `paint` runs only when `can_paint` is true and the document isn't waiting on
-    /// render-blocking resources, after the frame hook. The step this frame runs, if any, is acknowledged after
-    /// `paint` returns.
+    /// `paint` runs, after the frame hook, only when `can_paint` is true and the document
+    /// isn't waiting on render-blocking resources. The step this frame runs, if any, is
+    /// acknowledged after `paint` returns.
     pub fn frame(
         &mut self,
         doc: &mut D,
@@ -223,13 +230,11 @@ impl<D: Document + ?Sized, R: WindowRenderer> FrameScheduler<D, R> {
 
         let painted = can_paint && !doc.inner().has_pending_critical_resources();
         if painted {
-            if let Some(hook) = &mut self.frame_hook {
-                let inner = doc.inner();
-                let viewport = inner.viewport();
-                let (scale, scheme) = (viewport.scale_f64(), viewport.color_scheme);
-                drop(inner);
-                hook(renderer, time, scale, scheme);
-            }
+            let inner = doc.inner();
+            let viewport = inner.viewport();
+            let (scale, scheme) = (viewport.scale_f64(), viewport.color_scheme);
+            drop(inner);
+            self.run_hook(renderer, time, scale, scheme);
             paint(doc, renderer);
         }
         if let Some((_, ack)) = step {
@@ -649,6 +654,31 @@ mod tests {
 
         fx.frame(false);
         assert!(!fx.log.take().iter().any(|entry| entry.starts_with("hook")));
+    }
+
+    #[test]
+    fn run_hook_passes_the_resume_inputs() {
+        let mut fx = Fixture::new(TimeSource::Manual);
+        fx.scheduler.run_hook(
+            &mut fx.renderer,
+            FrameTime::new(0.5, 0.25, 2),
+            3.0,
+            ColorScheme::Dark,
+        );
+        assert!(fx.log.take().is_empty(), "no hook, no call");
+
+        let log = fx.log.clone();
+        fx.scheduler
+            .set_frame_hook(Some(Box::new(move |_, time, scale, scheme| {
+                log.push(format!("hook {} {} {:?}", time.t, scale, scheme));
+            })));
+        fx.scheduler.run_hook(
+            &mut fx.renderer,
+            FrameTime::new(0.5, 0.25, 2),
+            3.0,
+            ColorScheme::Dark,
+        );
+        assert_eq!(fx.log.take(), ["hook 0.5 3 Dark"]);
     }
 
     #[test]
