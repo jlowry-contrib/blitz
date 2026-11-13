@@ -295,7 +295,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "anyrender"
 version = "0.14.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "kurbo",
  "peniko",
@@ -307,7 +307,7 @@ dependencies = [
 [[package]]
 name = "anyrender_serialize"
 version = "0.8.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "image",
@@ -325,7 +325,7 @@ dependencies = [
 [[package]]
 name = "anyrender_skia"
 version = "0.12.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "ash",
@@ -356,7 +356,7 @@ dependencies = [
 [[package]]
 name = "anyrender_svg"
 version = "0.15.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "image",
@@ -368,12 +368,13 @@ dependencies = [
 [[package]]
 name = "anyrender_vello"
 version = "0.15.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-channel",
  "kurbo",
+ "log",
  "peniko",
  "pollster",
  "rustc-hash 2.1.3",
@@ -386,7 +387,7 @@ dependencies = [
 [[package]]
 name = "anyrender_vello_cpu"
 version = "0.18.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "bytemuck",
@@ -404,7 +405,7 @@ dependencies = [
 [[package]]
 name = "anyrender_vello_hybrid"
 version = "0.11.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -413,10 +414,13 @@ dependencies = [
  "kurbo",
  "peniko",
  "pollster",
+ "raw-window-handle",
  "rustc-hash 2.1.3",
  "vello_common",
  "vello_gpu",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "wgpu 30.0.1",
  "wgpu_context",
 ]
@@ -6355,7 +6359,7 @@ dependencies = [
 [[package]]
 name = "pixels_window_renderer"
 version = "0.9.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -7844,7 +7848,7 @@ dependencies = [
 [[package]]
 name = "softbuffer_window_renderer"
 version = "0.9.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "anyrender",
  "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -9098,8 +9102,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "vello"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "913abde56cab6131b62c0cc69b1a93b671d3c34b3097beb3714fd1dc93be8115"
+source = "git+https://github.com/jlowry-contrib/vello?rev=234433809d21ccc1ff7d2a6cc43a8a9188267512#234433809d21ccc1ff7d2a6cc43a8a9188267512"
 dependencies = [
  "bytemuck",
  "futures-intrusive",
@@ -9148,8 +9151,7 @@ dependencies = [
 [[package]]
 name = "vello_encoding"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1fb9548d2b46b0f79137b5b1d208ecbd76d432f74e7a2ba838615d117f11532"
+source = "git+https://github.com/jlowry-contrib/vello?rev=234433809d21ccc1ff7d2a6cc43a8a9188267512#234433809d21ccc1ff7d2a6cc43a8a9188267512"
 dependencies = [
  "bytemuck",
  "guillotiere",
@@ -9190,8 +9192,7 @@ dependencies = [
 [[package]]
 name = "vello_shaders"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e653222cee49f2571729c3e4b0fa99bc4f826c6bb9487dbb88b825d552b3a27"
+source = "git+https://github.com/jlowry-contrib/vello?rev=234433809d21ccc1ff7d2a6cc43a8a9188267512#234433809d21ccc1ff7d2a6cc43a8a9188267512"
 dependencies = [
  "bytemuck",
  "log",
@@ -9941,7 +9942,7 @@ dependencies = [
 [[package]]
 name = "wgpu_context"
 version = "0.10.0"
-source = "git+https://github.com/DioxusLabs/anyrender?branch=main#812644a68722626e6755ca8319ffebf53c9cdc4e"
+source = "git+https://github.com/jlowry-contrib/anyrender?rev=2f87e193f92f15d1608374dab82c3c8034308fc6#2f87e193f92f15d1608374dab82c3c8034308fc6"
 dependencies = [
  "futures-intrusive",
  "objc2-core-graphics",
