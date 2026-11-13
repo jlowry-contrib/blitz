@@ -61,6 +61,16 @@ pub fn viewport_geometry(
     }
 }
 
+/// Returns the new viewport size when the insets changed at an unchanged surface size.
+fn refreshed_viewport(
+    surface: PhysicalSize<u32>,
+    old: PhysicalInsets<u32>,
+    new: PhysicalInsets<u32>,
+    mode: SafeArea,
+) -> Option<PhysicalSize<u32>> {
+    (old != new).then(|| viewport_geometry(surface, new, mode).0)
+}
+
 /// Converts physical insets into CSS-px offsets at `scale`.
 fn css_insets(insets: PhysicalInsets<u32>, scale: f64) -> SideOffsets2D<f32, CSSPixel> {
     let css = |px: u32| (px as f64 / scale) as f32;
@@ -498,6 +508,7 @@ impl<Rend: WindowRenderer> View<Rend> {
     pub fn redraw(&mut self) {
         #[cfg(target_os = "ios")]
         self.ios_request_redraw.set(false);
+        self.refresh_safe_area_insets();
         let can_paint = self.is_visible && self.renderer.is_active();
         let (_, (offset_x, offset_y)) = self.geometry();
 
@@ -578,6 +589,24 @@ impl<Rend: WindowRenderer> View<Rend> {
         self.request_redraw();
     }
 
+    /// Re-reads the safe-area insets, which winit can change without a resize.
+    ///
+    /// On iOS a rotation or status-bar change only requests a redraw.
+    fn refresh_safe_area_insets(&mut self) {
+        let insets = get_safe_area_insets(&*self.window);
+        let viewport = refreshed_viewport(
+            self.surface_size,
+            self.safe_area_insets,
+            insets,
+            self.safe_area,
+        );
+        if let Some(viewport) = viewport {
+            self.safe_area_insets = insets;
+            self.with_viewport(|v| v.window_size = (viewport.width, viewport.height));
+            self.sync_safe_area_insets();
+        }
+    }
+
     /// Passes the safe-area insets to the document, in CSS px.
     fn sync_safe_area_insets(&mut self) {
         let mut inner = self.doc.inner_mut();
@@ -623,6 +652,9 @@ impl<Rend: WindowRenderer> View<Rend> {
         active.len() != len_before
     }
 
+    /// Updates the viewport through `cb`, then sizes the renderer to the stored surface size.
+    ///
+    /// The renderer is not resized to the viewport: the surface size changes only on resize.
     #[inline]
     pub fn with_viewport(&mut self, cb: impl FnOnce(&mut Viewport)) {
         let mut inner = self.doc.inner_mut();
@@ -1042,6 +1074,26 @@ mod tests {
     fn avoid_mode_matches_today() {
         let geometry = viewport_geometry(SURFACE, INSETS, SafeArea::Avoid);
         assert_eq!(geometry, (PhysicalSize::new(1206, 2334), (0, 186)));
+    }
+
+    #[test]
+    fn insets_changed_at_same_size_updates_viewport() {
+        // A 180° landscape rotation swaps the left and right insets at the same size.
+        let surface = PhysicalSize::new(2622, 1206);
+        let left = PhysicalInsets::new(0, 186, 63, 0);
+        let right = PhysicalInsets::new(0, 0, 63, 186);
+        assert_eq!(
+            refreshed_viewport(surface, left, right, SafeArea::Avoid),
+            Some(PhysicalSize::new(2436, 1143))
+        );
+        assert_eq!(
+            refreshed_viewport(surface, left, right, SafeArea::Ignore),
+            Some(surface)
+        );
+        assert_eq!(
+            refreshed_viewport(surface, left, left, SafeArea::Avoid),
+            None
+        );
     }
 
     #[test]
