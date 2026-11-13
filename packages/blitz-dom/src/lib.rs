@@ -46,6 +46,7 @@ mod debug;
 mod events;
 mod font_metrics;
 mod form;
+pub mod glass;
 mod html;
 /// Loading of `<iframe>` elements into sub-documents.
 mod iframe;

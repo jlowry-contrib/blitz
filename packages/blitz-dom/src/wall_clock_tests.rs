@@ -18,6 +18,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("events/pointer.rs", include_str!("events/pointer.rs")),
     ("font_metrics.rs", include_str!("font_metrics.rs")),
     ("form.rs", include_str!("form.rs")),
+    ("glass.rs", include_str!("glass.rs")),
     ("html.rs", include_str!("html.rs")),
     ("iframe.rs", include_str!("iframe.rs")),
     ("layout/construct.rs", include_str!("layout/construct.rs")),

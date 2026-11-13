@@ -11,6 +11,10 @@ edition.workspace = true
 autotests = false
 rust-version.workspace = true
 
+[dependencies]
+# Shared test helpers in `lib.rs`
+blitz-dom = { workspace = true }
+
 [dev-dependencies]
 # Blitz dependencies
 blitz-test-harness = { workspace = true }

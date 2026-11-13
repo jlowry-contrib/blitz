@@ -1153,6 +1153,21 @@ impl Node {
             .and_then(|stylo| stylo.primary_styles())
     }
 
+    /// The primary styles of this node's parent, if it has any.
+    fn parent_primary_styles(&self) -> Option<impl Deref<Target = ServoArc<ComputedValues>> + '_> {
+        self.tree().get(self.parent?)?.primary_styles()
+    }
+
+    /// This node's glass custom properties, or `None` when it has no styles.
+    pub fn glass_props(&self) -> Option<crate::glass::GlassProps> {
+        let style = self.primary_styles()?;
+        let parent = self.parent_primary_styles();
+        Some(crate::glass::GlassProps::read(
+            &style,
+            parent.as_deref().map(|s| &**s),
+        ))
+    }
+
     /// A lazy Taffy style backed by this node's primary stylo style.
     ///
     /// Panics if the node has no computed styles: layout always runs after
@@ -1371,6 +1386,11 @@ impl Node {
         }
 
         if !style.get_effects().backdrop_filter.0.is_empty() {
+            return true;
+        }
+
+        let parent_style = self.parent_primary_styles();
+        if crate::glass::has_glass(&style, parent_style.as_deref().map(|s| &**s)) {
             return true;
         }
         // TODO: contain
