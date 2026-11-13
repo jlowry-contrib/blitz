@@ -1,6 +1,7 @@
 use kurbo::{Arc, BezPath, Insets, PathEl, Point, Rect, Shape as _, Vec2};
 use std::{f64::consts::FRAC_PI_2, f64::consts::PI};
 
+use super::corner_curve::{CornerCurve, CornerFrame, CornerHalves, superellipse_corner};
 use super::non_uniform_radii::NonUniformRoundedRectRadii;
 use super::{Corner, CssBoxKind, Direction, Edge, add_insets, get_corner_insets};
 
@@ -40,6 +41,8 @@ pub struct CssBox {
     pub outline_width: f64,
 
     pub border_radii: NonUniformRoundedRectRadii,
+    /// The curve of each corner: top-left, top-right, bottom-right, bottom-left.
+    pub corner_curves: [CornerCurve; 4],
 }
 
 impl CssBox {
@@ -83,7 +86,14 @@ impl CssBox {
             padding_width: padding,
             border_width: border,
             border_radii,
+            corner_curves: [CornerCurve::Round; 4],
         }
+    }
+
+    /// Sets the curve of each corner: top-left, top-right, bottom-right, bottom-left.
+    pub fn with_corner_curves(mut self, corner_curves: [CornerCurve; 4]) -> Self {
+        self.corner_curves = corner_curves;
+        self
     }
 
     /// Construct a BezPath representing one edge of a box's border.
@@ -109,7 +119,17 @@ impl CssBox {
 
         // 1. First corner
         // if the radius is bigger than the border, we need to draw the inner arc to fill in the gap
-        if self.is_sharp(c0, BorderBox) {
+        if self.corner_curve(c0) != CornerCurve::Round {
+            // Shaped corners change colour at their diagonal.
+            match self.shaped_corner(c0, PaddingBox) {
+                Some((_, inner)) => path.insert_path(inner.reverse_subpaths()),
+                None => path.move_to(self.corner(c0, PaddingBox)),
+            }
+            match self.shaped_corner(c0, BorderBox) {
+                Some((_, outer)) => path.insert_path(outer),
+                None => path.line_to(self.corner(c0, BorderBox)),
+            }
+        } else if self.is_sharp(c0, BorderBox) {
             path.move_to(self.corner(c0, PaddingBox));
             path.line_to(self.corner(c0, BorderBox));
         } else {
@@ -123,7 +143,16 @@ impl CssBox {
         }
 
         // 2. Second corner
-        if self.is_sharp(c1, BorderBox) {
+        if self.corner_curve(c1) != CornerCurve::Round {
+            match self.shaped_corner(c1, BorderBox) {
+                Some((outer, _)) => path.insert_path(outer),
+                None => path.line_to(self.corner(c1, BorderBox)),
+            }
+            match self.shaped_corner(c1, PaddingBox) {
+                Some((inner, _)) => path.insert_path(inner.reverse_subpaths()),
+                None => path.line_to(self.corner(c1, PaddingBox)),
+            }
+        } else if self.is_sharp(c1, BorderBox) {
             path.line_to(self.corner(c1, BorderBox));
             path.line_to(self.corner(c1, PaddingBox));
         } else {
@@ -193,6 +222,36 @@ impl CssBox {
             0.0,
             slice_radii,
         )
+        .with_corner_curves(self.corner_curves)
+    }
+
+    /// Whether every corner is round, as `border-radius` draws it on its own.
+    pub fn has_round_corners(&self) -> bool {
+        self.corner_curves.iter().all(|c| *c == CornerCurve::Round)
+    }
+
+    /// The border box's contour, inset by `insets` (outset where negative), as box
+    /// shadows and their spread use it.
+    ///
+    /// Round corners take the same css-borders-4 contour as superellipse(1).
+    pub(crate) fn contour_path(&self, insets: Insets) -> BezPath {
+        use Corner::*;
+        let target = self.border_box - insets;
+        let mut path = BezPath::new();
+        for corner in [TopLeft, TopRight, BottomRight, BottomLeft] {
+            let k = match self.corner_curve(corner) {
+                CornerCurve::Round => 1.0,
+                CornerCurve::Superellipse(k) => k,
+            };
+            match superellipse_corner(k, &self.corner_frame(corner, insets)) {
+                Some((first, second)) => {
+                    path.insert_path(first);
+                    path.insert_path(second);
+                }
+                None => path.insert_point(rect_corner(target, corner)),
+            }
+        }
+        path
     }
 
     /// Construct a bezpath drawing the outline
@@ -291,11 +350,112 @@ impl CssBox {
         };
 
         for corner in route {
-            if self.is_sharp(corner, line) {
-                path.insert_point(self.corner(corner, line));
-            } else {
-                path.insert_arc(self.corner_arc(corner, line, direction));
+            path.insert_path(self.corner_path(corner, line, direction));
+        }
+    }
+
+    /// The curve of a corner.
+    fn corner_curve(&self, corner: Corner) -> CornerCurve {
+        let index = match corner {
+            Corner::TopLeft => 0,
+            Corner::TopRight => 1,
+            Corner::BottomRight => 2,
+            Corner::BottomLeft => 3,
+        };
+        self.corner_curves[index]
+    }
+
+    /// The whole curve of a corner, starting with a `MoveTo`.
+    fn corner_path(&self, corner: Corner, css_box: CssBoxKind, direction: Direction) -> BezPath {
+        if self.corner_curve(corner) == CornerCurve::Round {
+            if self.is_sharp(corner, css_box) {
+                let mut path = BezPath::new();
+                path.move_to(self.corner(corner, css_box));
+                return path;
             }
+            const TOLERANCE: f64 = 0.1;
+            let arc = self.corner_arc(corner, css_box, direction);
+            return arc.path_elements(TOLERANCE).collect();
+        }
+
+        let Some((first, second)) = self.shaped_corner(corner, css_box) else {
+            let mut path = BezPath::new();
+            path.move_to(self.corner(corner, css_box));
+            return path;
+        };
+        let mut path = first;
+        path.insert_path(second);
+        match direction {
+            Direction::Clockwise => path,
+            Direction::Anticlockwise => path.reverse_subpaths(),
+        }
+    }
+
+    /// The two clockwise halves of a shaped corner, or `None` where it is sharp.
+    fn shaped_corner(&self, corner: Corner, css_box: CssBoxKind) -> Option<CornerHalves> {
+        let insets = match css_box {
+            CssBoxKind::OutlineBox => Insets::uniform(-self.outline_width),
+            CssBoxKind::BorderBox => Insets::ZERO,
+            CssBoxKind::PaddingBox => self.border_width,
+            CssBoxKind::ContentBox => add_insets(self.border_width, self.padding_width),
+        };
+        match self.corner_curve(corner) {
+            CornerCurve::Round => None,
+            CornerCurve::Superellipse(k) => {
+                superellipse_corner(k, &self.corner_frame(corner, insets))
+            }
+        }
+    }
+
+    /// A corner of the contour `insets` inside the border box, as css-borders-4's
+    /// border contour path sets it up.
+    fn corner_frame(&self, corner: Corner, insets: Insets) -> CornerFrame {
+        let target = self.border_box - insets;
+        let size = self.border_box.size();
+        let radius = match corner {
+            Corner::TopLeft => self.border_radii.top_left,
+            Corner::TopRight => self.border_radii.top_right,
+            Corner::BottomRight => self.border_radii.bottom_right,
+            Corner::BottomLeft => self.border_radii.bottom_left,
+        };
+        // The spec's adjusted inset: the radius less its outset-adjusted radius.
+        let coverage = 2.0 * (radius.x / size.width).min(radius.y / size.height);
+        let adjusted = |r: f64, inset: f64| {
+            let outset = -inset;
+            let adjusted_radius = if r > outset || coverage > 1.0 {
+                r + outset
+            } else {
+                let ratio = r / outset;
+                r + outset * (1.0 - (1.0 - ratio).powi(3) * (1.0 - coverage.powi(3)))
+            };
+            r - adjusted_radius
+        };
+        let corner_insets = get_corner_insets(insets, corner);
+        let (ix, iy) = (
+            adjusted(radius.x, corner_insets.x),
+            adjusted(radius.y, corner_insets.y),
+        );
+        let outer = rect_corner(target, corner);
+        let frame = |start_radius, end_radius, start_inset, end_inset, v3, v2| CornerFrame {
+            start_radius,
+            end_radius,
+            start_inset,
+            end_inset,
+            target_outer: outer,
+            v3,
+            v2,
+        };
+        let (left, right, up, down) = (
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(0.0, -1.0),
+            Vec2::new(0.0, 1.0),
+        );
+        match corner {
+            Corner::TopRight => frame(radius.y, radius.x, iy, ix, left, down),
+            Corner::BottomRight => frame(radius.x, radius.y, ix, iy, up, left),
+            Corner::BottomLeft => frame(radius.y, radius.x, iy, ix, right, up),
+            Corner::TopLeft => frame(radius.x, radius.y, ix, iy, down, right),
         }
     }
 
@@ -313,25 +473,13 @@ impl CssBox {
             path.insert_point(self.shadow_clip_corner(corner, shadow_rect));
         }
 
-        if self.is_sharp(TopLeft, CssBoxKind::BorderBox) {
-            path.move_to(self.corner(TopLeft, CssBoxKind::BorderBox));
-        } else {
-            const TOLERANCE: f64 = 0.1;
-            let arc = self.corner_arc(TopLeft, CssBoxKind::BorderBox, Direction::Anticlockwise);
-            let elements = arc.path_elements(TOLERANCE);
-            path.extend(elements);
-        }
-
+        path.extend(self.corner_path(TopLeft, CssBoxKind::BorderBox, Direction::Anticlockwise));
         for corner in [/*TopLeft, */ BottomLeft, BottomRight, TopRight] {
-            if self.is_sharp(corner, CssBoxKind::BorderBox) {
-                path.insert_point(self.corner(corner, CssBoxKind::BorderBox));
-            } else {
-                path.insert_arc(self.corner_arc(
-                    corner,
-                    CssBoxKind::BorderBox,
-                    Direction::Anticlockwise,
-                ));
-            }
+            path.insert_path(self.corner_path(
+                corner,
+                CssBoxKind::BorderBox,
+                Direction::Anticlockwise,
+            ));
         }
     }
 
@@ -594,11 +742,22 @@ impl CssBox {
     }
 }
 
+/// The corner of `rect` at `corner`.
+fn rect_corner(rect: Rect, corner: Corner) -> Point {
+    match corner {
+        Corner::TopLeft => Point::new(rect.x0, rect.y0),
+        Corner::TopRight => Point::new(rect.x1, rect.y0),
+        Corner::BottomRight => Point::new(rect.x1, rect.y1),
+        Corner::BottomLeft => Point::new(rect.x0, rect.y1),
+    }
+}
+
 /// Makes it easier to insert objects into a bezpath without having to do checks
 /// Mostly because I consider the vello api slightly defficient
 trait BuildBezpath {
     const TOLERANCE: f64;
     fn insert_arc(&mut self, arc: Arc);
+    fn insert_path(&mut self, path: BezPath);
     fn insert_point(&mut self, point: Point);
 }
 
@@ -612,6 +771,17 @@ impl BuildBezpath for BezPath {
         match elements.next().unwrap() {
             PathEl::MoveTo(a) if !self.elements().is_empty() => self.push(PathEl::LineTo(a)),
             el => self.push(el),
+        }
+        self.extend(elements)
+    }
+
+    /// Continues the current subpath with `path`, joining its start with a line.
+    fn insert_path(&mut self, path: BezPath) {
+        let mut elements = path.into_iter();
+        match elements.next() {
+            Some(PathEl::MoveTo(a)) if !self.elements().is_empty() => self.push(PathEl::LineTo(a)),
+            Some(el) => self.push(el),
+            None => {}
         }
         self.extend(elements)
     }

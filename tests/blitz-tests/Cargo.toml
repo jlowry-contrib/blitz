@@ -37,6 +37,7 @@ accesskit = { workspace = true }
 markup5ever = { workspace = true }
 cursor-icon = { workspace = true }
 keyboard-types = { workspace = true }
+kurbo = { workspace = true }
 taffy = { workspace = true }
 test-that = { workspace = true }
 usvg = { workspace = true }

@@ -181,7 +181,9 @@ impl ElementCx<'_, '_> {
             .all(|c| c.resolve_to_absolute(&current_color).as_srgb_color() == color);
             let bw = self.frame.border_width;
             let uniform_width = bw.x0 == bw.y0 && bw.x0 == bw.x1 && bw.x0 == bw.y1 && bw.x0 > 0.0;
-            if same_color && uniform_width && color.components[3] > 0.0 {
+            // Shaped corners have no stroke equivalent; they take the per-edge fill.
+            let round = self.frame.has_round_corners();
+            if same_color && uniform_width && round && color.components[3] > 0.0 {
                 let bb = self.frame.border_box;
                 let pb = self.frame.padding_box;
                 let width = (bb.width() - pb.width()) / 2.0;

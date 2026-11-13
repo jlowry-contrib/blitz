@@ -2,7 +2,7 @@ use super::ElementCx;
 use crate::color::{Color, ToColorColor as _};
 use anyrender::PaintScene;
 use blitz_dom::CopyStyleGetters;
-use kurbo::{Rect, Vec2};
+use kurbo::{Insets, Rect, Vec2};
 use peniko::{Compose, Fill, Mix};
 
 impl ElementCx<'_, '_> {
@@ -76,6 +76,15 @@ impl ElementCx<'_, '_> {
                             continue;
                         }
 
+                        // An unblurred shadow of shaped corners is the spread contour. A
+                        // blurred one stays a blurred rounded rect, since the GPU backend
+                        // can't blur a path.
+                        if blur == 0.0 && !self.frame.has_round_corners() {
+                            let shape = self.frame.contour_path(Insets::uniform(-spread));
+                            scene.fill(Fill::NonZero, transform, shadow_color, None, &shape);
+                            continue;
+                        }
+
                         // TODO draw shadows with matching individual radii instead of averaging
                         let radius = self.frame.border_radii.average();
                         let rect = self.frame.border_box.inflate(spread, spread);
@@ -143,6 +152,24 @@ impl ElementCx<'_, '_> {
             );
             // The unshadowed area is the padding box shrunk by the spread radius
             let spread = shadow.spread.px() as f64 * self.scale;
+            if shadow.base.blur.px() == 0.0 && !self.frame.has_round_corners() {
+                let bw = self.frame.border_width;
+                let insets = Insets::new(
+                    bw.x0 + spread,
+                    bw.y0 + spread,
+                    bw.x1 + spread,
+                    bw.y1 + spread,
+                );
+                let hole = self.frame.contour_path(insets);
+                let transform = self.transform.then_translate(Vec2 {
+                    x: shadow.base.horizontal.px() as f64 * self.scale,
+                    y: shadow.base.vertical.px() as f64 * self.scale,
+                });
+                scene.fill(Fill::NonZero, transform, Color::WHITE, None, &hole);
+                scene.pop_layer();
+                scene.pop_layer();
+                continue;
+            }
             let hole = self.frame.padding_box.inflate(-spread, -spread);
             scene.draw_box_shadow(
                 transform,

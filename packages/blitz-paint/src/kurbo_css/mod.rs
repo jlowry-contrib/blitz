@@ -8,9 +8,11 @@
 
 use kurbo::{Insets, Vec2};
 
+mod corner_curve;
 mod css_box;
 mod non_uniform_radii;
 
+pub use corner_curve::CornerCurve;
 pub use css_box::CssBox;
 pub use non_uniform_radii::NonUniformRoundedRectRadii;
 

@@ -17,6 +17,7 @@ mod button_alignment;
 mod checked_attribute;
 mod clipboard;
 mod comment_layout;
+mod corner_shape;
 mod custom_widget_layout;
 mod detached_attribute;
 mod details_element;
