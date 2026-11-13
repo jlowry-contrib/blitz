@@ -948,3 +948,33 @@ fn file_document_can_load_sibling_file_urls() {
 
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn queued_scroll_events_reach_script_listeners() {
+    let mut doc = doc_from_html(
+        r#"
+        <html><body>
+            <div id="scroller" style="width:200px; height:200px; overflow-y:scroll;">
+                <div style="height:4000px"></div>
+            </div>
+            <div id="out">none</div>
+            <script>
+                let scrolls = 0;
+                document.getElementById("scroller").addEventListener("scroll", () => {
+                    scrolls += 1;
+                    document.getElementById("out").textContent = `scrolls ${scrolls}`;
+                });
+            </script>
+        </body></html>
+        "#,
+    );
+    doc.inner_mut().resolve(0.0);
+    {
+        let mut inner = doc.inner_mut();
+        let scroller = inner.query_selector("#scroller").unwrap().unwrap();
+        inner.scroll_to(scroller, 0.0, 120.0, blitz_dom::ScrollBehavior::Instant);
+    }
+
+    doc.flush_queued_events();
+    assert_eq!(text_of_selector(&doc, "#out"), "scrolls 1");
+}

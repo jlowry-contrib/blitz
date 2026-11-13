@@ -390,7 +390,8 @@ impl BaseDocument {
 
     /// Scroll the viewport by the given values
     pub fn scroll_viewport_by_has_changed(&mut self, x: f64, y: f64) -> bool {
-        self.scroll(
+        let mut events = Vec::new();
+        let changed = self.scroll(
             ScrollRequest {
                 target: ScrollTarget::Viewport,
                 amount: ScrollAmount::By(Point { x: -x, y: -y }),
@@ -399,8 +400,10 @@ impl BaseDocument {
                 behavior: ScrollBehavior::Instant,
                 interrupt_animation: false,
             },
-            &mut |_| {},
-        )
+            &mut |event| events.push(event),
+        );
+        self.queue_scroll_events(events);
+        changed
     }
 
     pub(crate) fn scroll_chain_by(
@@ -567,7 +570,7 @@ impl BaseDocument {
             return;
         }
 
-        // TODO: dispatch `scroll` events for programmatic scrolls.
+        let mut events = Vec::new();
         self.scroll(
             ScrollRequest {
                 target: ScrollTarget::Node(node_id),
@@ -577,8 +580,9 @@ impl BaseDocument {
                 behavior,
                 interrupt_animation: true,
             },
-            &mut |_| {},
+            &mut |event| events.push(event),
         );
+        self.queue_scroll_events(events);
     }
 
     fn aligned_scroll_offset(
@@ -734,7 +738,11 @@ impl BaseDocument {
                 let dx = fling_state.x_velocity * time_diff_ms;
                 let dy = fling_state.y_velocity * time_diff_ms;
 
-                self.scroll_chain_by(Some(fling_state.target), dx, dy, &mut |_| {});
+                let mut events = Vec::new();
+                self.scroll_chain_by(Some(fling_state.target), dx, dy, &mut |event| {
+                    events.push(event)
+                });
+                self.queue_scroll_events(events);
                 if fling_state.x_velocity.abs() < 0.1 && fling_state.y_velocity.abs() < 0.1 {
                     self.scroll_animation = ScrollAnimationState::None;
                 }
@@ -757,8 +765,9 @@ impl BaseDocument {
                     x: scroll_to.start.x + (scroll_to.end.x - scroll_to.start.x) * eased,
                     y: scroll_to.start.y + (scroll_to.end.y - scroll_to.start.y) * eased,
                 };
-                // TODO: dispatch `scroll` events for programmatic scrolls.
-                self.write_scroll_offset(scroll_to.target, target, &mut |_| {});
+                let mut events = Vec::new();
+                self.write_scroll_offset(scroll_to.target, target, &mut |event| events.push(event));
+                self.queue_scroll_events(events);
 
                 if progress >= 1.0 {
                     self.scroll_animation = ScrollAnimationState::None;

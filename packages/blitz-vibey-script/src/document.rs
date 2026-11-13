@@ -420,6 +420,24 @@ impl Document for ScriptDocument {
         self.arm_timer_thread();
     }
 
+    fn flush_queued_events(&mut self) {
+        let events = self.inner.borrow_mut().take_queued_events();
+        if events.is_empty() {
+            return;
+        }
+        let handler = ScriptEventHandler {
+            runtime: &mut self.runtime,
+        };
+        let mut driver = EventDriver::new(&mut self.inner, handler);
+        for event in events {
+            driver.handle_dom_event(event);
+        }
+
+        // JS may have mutated the DOM or scheduled timers
+        self.request_redraw();
+        self.arm_timer_thread();
+    }
+
     fn poll(&mut self, task_context: Option<TaskContext>) -> bool {
         // Store the waker so the timer thread can wake the event loop
         if let Some(cx) = &task_context {

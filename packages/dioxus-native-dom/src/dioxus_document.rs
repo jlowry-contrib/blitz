@@ -311,6 +311,22 @@ impl Document for DioxusDocument {
         let mut driver = EventDriver::new(&mut self.inner, handler);
         driver.handle_ui_event(event);
     }
+
+    /// Dispatches the frame's queued events, such as animated `scroll`s, to the VirtualDom.
+    fn flush_queued_events(&mut self) {
+        let events = self.inner.borrow_mut().take_queued_events();
+        if events.is_empty() {
+            return;
+        }
+        let handler = DioxusEventHandler {
+            vdom: &mut self.vdom,
+            vdom_state: &mut self.vdom_state,
+        };
+        let mut driver = EventDriver::new(&mut self.inner, handler);
+        for event in events {
+            driver.handle_dom_event(event);
+        }
+    }
 }
 
 pub struct DioxusEventHandler<'v> {

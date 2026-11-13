@@ -246,8 +246,20 @@ pub trait Document: Any + 'static {
         false
     }
 
-    /// Dispatches the events queued while the frame was resolved; by default, there are none.
-    fn flush_queued_events(&mut self) {}
+    /// Dispatches the frame's queued events, such as `scroll`s, running only default actions.
+    ///
+    /// Documents with event listeners override this to deliver the events to them.
+    fn flush_queued_events(&mut self) {
+        let mut doc = self.inner_mut();
+        let events = doc.take_queued_events();
+        if events.is_empty() {
+            return;
+        }
+        let mut driver = EventDriver::new(&mut *doc, NoopEventHandler);
+        for event in events {
+            driver.handle_dom_event(event);
+        }
+    }
 }
 
 pub struct PlainDocument(pub BaseDocument);
@@ -389,6 +401,8 @@ pub struct BaseDocument {
     pub(crate) frame_time: FrameTime,
     /// Whether and what kind of scroll animation is currently in progress
     pub(crate) scroll_animation: ScrollAnimationState,
+    /// The `scroll` events waiting for the frame's flush, at most one per target
+    pub(crate) queued_events: Vec<DomEvent>,
 
     /// Text selection state (for non-input text)
     pub(crate) text_selection: TextSelection,
@@ -630,6 +644,7 @@ impl BaseDocument {
             scrollbar_activity: HashMap::new(),
             frame_time: FrameTime::default(),
             scroll_animation: ScrollAnimationState::None,
+            queued_events: Vec::new(),
             text_selection: TextSelection::default(),
             scratch: DocumentScratch::default(),
         };
@@ -2310,6 +2325,27 @@ impl BaseDocument {
     /// Returns the time of the frame being produced.
     pub fn frame_time(&self) -> FrameTime {
         self.frame_time
+    }
+
+    /// Queues `scroll` events for the frame's flush, keeping only the latest one per target.
+    pub(crate) fn queue_scroll_events(&mut self, events: impl IntoIterator<Item = DomEvent>) {
+        for event in events {
+            match self
+                .queued_events
+                .iter_mut()
+                .find(|queued| queued.target == event.target)
+            {
+                Some(queued) => *queued = event,
+                None => self.queued_events.push(event),
+            }
+        }
+    }
+
+    /// Takes the queued events whose targets are still in the document, in the order queued.
+    pub fn take_queued_events(&mut self) -> Vec<DomEvent> {
+        let mut events = std::mem::take(&mut self.queued_events);
+        events.retain(|event| self.nodes.get(event.target).is_some());
+        events
     }
 
     pub fn is_animating(&self) -> bool {
