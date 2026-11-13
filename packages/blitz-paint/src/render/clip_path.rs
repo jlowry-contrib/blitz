@@ -1,9 +1,12 @@
 use super::ElementCx;
+use crate::kurbo_css::CssBox;
 use kurbo::{BezPath, Circle, Ellipse, Point, Rect, Shape, SvgArc, Vec2};
-use style::values::computed::basic_shape::{BasicShape, ClipPath};
-use style::values::computed::{Angle, CSSPixelLength, LengthPercentage};
+use style::values::computed::basic_shape::{
+    BasicShape, Circle as CircleShape, ClipPath, Ellipse as EllipseShape, InsetRect,
+};
+use style::values::computed::{Angle, BorderCornerRadius, CSSPixelLength, LengthPercentage};
 use style::values::generics::basic_shape::{
-    ArcSize, ArcSweep, AxisEndPoint, CommandEndPoint, ControlPoint, ControlReference,
+    ArcSize, ArcSweep, AxisEndPoint, CommandEndPoint, ControlPoint, ControlReference, FillRule,
     GenericBasicShape, GenericPathOrShapeFunction, GenericShapeCommand, GenericShapeRadius,
     ShapeBox, ShapeGeometryBox,
 };
@@ -51,148 +54,239 @@ impl ElementCx<'_, '_> {
                 None
             }
             ClipPath::Shape(basic_shape, geometry_box) => {
-                let reference_box = self.resolve_geometry_box(geometry_box);
-                self.basic_shape_to_path(basic_shape, reference_box)
+                let reference_box = resolve_geometry_box(&self.frame, self.scale, geometry_box);
+                basic_shape_to_path(basic_shape, reference_box)
             }
             ClipPath::Box(geometry_box) => {
-                let reference_box = self.resolve_geometry_box(geometry_box);
+                let reference_box = resolve_geometry_box(&self.frame, self.scale, geometry_box);
                 Some(Rect::from(reference_box).into_path(0.1))
             }
         }
     }
+}
 
-    /// Resolve a ShapeGeometryBox to a concrete rectangle (x, y, width, height) in scaled pixels
-    ///
-    /// For SVG elements without associated CSS layout box, the used value for content-box and padding-box is fill-box and for border-box and margin-box is stroke-box.
-    /// For elements with associated CSS layout box, the used value for fill-box is content-box and for stroke-box and view-box is border-box.
-    fn resolve_geometry_box(&self, geometry_box: &ShapeGeometryBox) -> ReferenceBox {
-        match geometry_box {
-            ShapeGeometryBox::ElementDependent
-            | ShapeGeometryBox::StrokeBox
-            | ShapeGeometryBox::ViewBox
-            | ShapeGeometryBox::ShapeBox(ShapeBox::BorderBox) => ReferenceBox {
+/// Resolve a ShapeGeometryBox to a concrete rectangle (x, y, width, height) in scaled pixels
+///
+/// For SVG elements without associated CSS layout box, the used value for content-box and padding-box is fill-box and for border-box and margin-box is stroke-box.
+/// For elements with associated CSS layout box, the used value for fill-box is content-box and for stroke-box and view-box is border-box.
+fn resolve_geometry_box(
+    frame: &CssBox,
+    scale: f64,
+    geometry_box: &ShapeGeometryBox,
+) -> ReferenceBox {
+    match geometry_box {
+        ShapeGeometryBox::ElementDependent
+        | ShapeGeometryBox::StrokeBox
+        | ShapeGeometryBox::ViewBox
+        | ShapeGeometryBox::ShapeBox(ShapeBox::BorderBox) => ReferenceBox {
+            x: 0.0,
+            y: 0.0,
+            width: frame.border_box.width() / scale,
+            height: frame.border_box.height() / scale,
+        },
+        ShapeGeometryBox::ShapeBox(ShapeBox::PaddingBox) => ReferenceBox {
+            x: frame.border_width.x0 / scale,
+            y: frame.border_width.y0 / scale,
+            width: frame.padding_box.width() / scale,
+            height: frame.padding_box.height() / scale,
+        },
+        ShapeGeometryBox::FillBox | ShapeGeometryBox::ShapeBox(ShapeBox::ContentBox) => {
+            ReferenceBox {
+                x: (frame.border_width.x0 + frame.padding_width.x0) / scale,
+                y: (frame.border_width.y0 + frame.padding_width.y0) / scale,
+                width: frame.content_box.width() / scale,
+                height: frame.content_box.height() / scale,
+            }
+        }
+        ShapeGeometryBox::ShapeBox(ShapeBox::MarginBox) => {
+            // Margin box is not tracked in CssBox, fall back to border box
+            ReferenceBox {
                 x: 0.0,
                 y: 0.0,
-                width: self.frame.border_box.width() / self.scale,
-                height: self.frame.border_box.height() / self.scale,
-            },
-            ShapeGeometryBox::ShapeBox(ShapeBox::PaddingBox) => ReferenceBox {
-                x: self.frame.border_width.x0 / self.scale,
-                y: self.frame.border_width.y0 / self.scale,
-                width: self.frame.padding_box.width() / self.scale,
-                height: self.frame.padding_box.height() / self.scale,
-            },
-            ShapeGeometryBox::FillBox | ShapeGeometryBox::ShapeBox(ShapeBox::ContentBox) => {
-                ReferenceBox {
-                    x: (self.frame.border_width.x0 + self.frame.padding_width.x0) / self.scale,
-                    y: (self.frame.border_width.y0 + self.frame.padding_width.y0) / self.scale,
-                    width: self.frame.content_box.width() / self.scale,
-                    height: self.frame.content_box.height() / self.scale,
-                }
-            }
-            ShapeGeometryBox::ShapeBox(ShapeBox::MarginBox) => {
-                // Margin box is not tracked in CssBox, fall back to border box
-                ReferenceBox {
-                    x: 0.0,
-                    y: 0.0,
-                    width: self.frame.border_box.width() / self.scale,
-                    height: self.frame.border_box.height() / self.scale,
-                }
+                width: frame.border_box.width() / scale,
+                height: frame.border_box.height() / scale,
             }
         }
     }
+}
 
-    /// Convert a CSS basic-shape to a kurbo BezPath
-    fn basic_shape_to_path(
-        &self,
-        shape: &BasicShape,
-        reference_box: ReferenceBox,
-    ) -> Option<BezPath> {
-        let w = reference_box.width;
-        let h = reference_box.height;
-        let ox = reference_box.x;
-        let oy = reference_box.y;
+/// What a glass element's `clip-path` makes of its glass shape, in border-box CSS px.
+pub(super) enum GlassClip {
+    /// An `inset()`, with its `round` radii.
+    Inset {
+        /// The inset rectangle.
+        rect: Rect,
+        /// The radii as written, top-left, top-right, bottom-right, bottom-left, before
+        /// overlap scaling.
+        radii: [Vec2; 4],
+    },
+    /// A `circle()` or `ellipse()`, as the rectangle it is inscribed in.
+    Ellipse(Rect),
+    /// A `path()`, `shape()` or `polygon()`.
+    Path {
+        /// The outline, in the same space as the other kinds.
+        path: BezPath,
+        /// Whether the clip path asked for the evenodd fill rule.
+        evenodd: bool,
+    },
+}
 
-        match shape {
-            GenericBasicShape::Circle(circle) => {
-                let (cx, cy) = resolve_position(&circle.position, w, h, ox, oy);
-                let r = resolve_shape_radius(&circle.radius, w, h, cx - ox, cy - oy);
-                Some(Circle::new(Point::new(cx, cy), r).into_path(0.1))
-            }
-            GenericBasicShape::Ellipse(ellipse) => {
-                let (cx, cy) = resolve_position(&ellipse.position, w, h, ox, oy);
-                let rx = resolve_shape_radius(&ellipse.semiaxis_x, w, h, cx - ox, cy - oy);
-                let ry = resolve_shape_radius(&ellipse.semiaxis_y, h, w, cy - oy, cx - ox);
-                Some(Ellipse::new(Point::new(cx, cy), (rx, ry), 0.0).into_path(0.1))
-            }
-            GenericBasicShape::Polygon(polygon) => {
-                let mut path = BezPath::new();
-                let _fill = &polygon.fill;
-                let coords = &polygon.coordinates;
-
-                if coords.is_empty() {
-                    return None;
-                }
-
-                for (i, coord) in coords.iter().enumerate() {
-                    let x = ox + resolve_lp(&coord.0, w);
-                    let y = oy + resolve_lp(&coord.1, h);
-                    if i == 0 {
-                        path.move_to(Point::new(x, y));
-                    } else {
-                        path.line_to(Point::new(x, y));
-                    }
-                }
-                path.close_path();
-
-                Some(path)
-            }
-            GenericBasicShape::Rect(inset_rect) => {
-                // inset() function: inset(top right bottom left round border-radius)
-                let top = resolve_lp(&inset_rect.rect.0, h);
-                let right = resolve_lp(&inset_rect.rect.1, w);
-                let bottom = resolve_lp(&inset_rect.rect.2, h);
-                let left = resolve_lp(&inset_rect.rect.3, w);
-
-                let x0 = ox + left;
-                let y0 = oy + top;
-                let x1 = ox + w - right;
-                let y1 = oy + h - bottom;
-
-                if x1 <= x0 || y1 <= y0 {
-                    return None;
-                }
-
-                // TODO: Support border-radius on inset()
-                Some(kurbo::Rect::new(x0, y0, x1, y1).into_path(0.1))
-            }
-            GenericBasicShape::PathOrShape(path_or_shape) => match path_or_shape {
-                GenericPathOrShapeFunction::Path(path) => svg_path_to_bezpath(
-                    path.commands(),
-                    |v| *v as f64,
-                    |v| *v as f64,
-                    |v| *v as f64,
-                )
-                .map(|mut p| {
-                    p.apply_affine(kurbo::Affine::translate((ox, oy)));
-                    p
-                }),
-                GenericPathOrShapeFunction::Shape(shape) => svg_path_to_bezpath(
-                    &shape.commands,
-                    move |v: &LengthPercentage| {
-                        v.resolve(CSSPixelLength::new(w as f32)).px() as f64
-                    },
-                    move |v: &LengthPercentage| {
-                        v.resolve(CSSPixelLength::new(h as f32)).px() as f64
-                    },
-                    move |v: &Angle| v.degrees() as f64,
-                )
-                .map(|mut p| {
-                    p.apply_affine(kurbo::Affine::translate((ox, oy)));
-                    p
-                }),
-            },
+/// The glass shape that `clip_path` gives an element whose border box is `frame`, in device
+/// px at `scale`. `None` keeps the element's own box, as for `none`, a box or a URL.
+pub(super) fn glass_clip(clip_path: &ClipPath, frame: &CssBox, scale: f64) -> Option<GlassClip> {
+    let ClipPath::Shape(shape, geometry_box) = clip_path else {
+        return None;
+    };
+    let reference_box = resolve_geometry_box(frame, scale, geometry_box);
+    let fill = match &**shape {
+        GenericBasicShape::Circle(circle) => {
+            let (center, r) = circle_geometry(circle, reference_box);
+            return Some(GlassClip::Ellipse(Circle::new(center, r).bounding_box()));
         }
+        GenericBasicShape::Ellipse(ellipse) => {
+            let (center, radii) = ellipse_geometry(ellipse, reference_box);
+            return Some(GlassClip::Ellipse(Rect::from_center_size(
+                center,
+                (radii * 2.0).to_size(),
+            )));
+        }
+        GenericBasicShape::Rect(inset) => {
+            let rect = inset_rect(inset, reference_box)?;
+            let resolve = |radius: &BorderCornerRadius| {
+                Vec2::new(
+                    resolve_lp(&radius.0.width.0, reference_box.width),
+                    resolve_lp(&radius.0.height.0, reference_box.height),
+                )
+            };
+            let round = &inset.round;
+            let radii = [
+                &round.top_left,
+                &round.top_right,
+                &round.bottom_right,
+                &round.bottom_left,
+            ]
+            .map(resolve);
+            return Some(GlassClip::Inset { rect, radii });
+        }
+        GenericBasicShape::Polygon(polygon) => polygon.fill,
+        GenericBasicShape::PathOrShape(GenericPathOrShapeFunction::Path(path)) => path.fill,
+        GenericBasicShape::PathOrShape(GenericPathOrShapeFunction::Shape(shape)) => shape.fill,
+    };
+    let path = basic_shape_to_path(shape, reference_box)?;
+    Some(GlassClip::Path {
+        path,
+        evenodd: fill == FillRule::Evenodd,
+    })
+}
+
+/// The centre and radius of a `circle()` in `reference_box`.
+fn circle_geometry(circle: &CircleShape, reference_box: ReferenceBox) -> (Point, f64) {
+    let ReferenceBox {
+        x: ox,
+        y: oy,
+        width: w,
+        height: h,
+    } = reference_box;
+    let (cx, cy) = resolve_position(&circle.position, w, h, ox, oy);
+    let r = resolve_shape_radius(&circle.radius, w, h, cx - ox, cy - oy);
+    (Point::new(cx, cy), r)
+}
+
+/// The centre and semi-axes of an `ellipse()` in `reference_box`.
+fn ellipse_geometry(ellipse: &EllipseShape, reference_box: ReferenceBox) -> (Point, Vec2) {
+    let ReferenceBox {
+        x: ox,
+        y: oy,
+        width: w,
+        height: h,
+    } = reference_box;
+    let (cx, cy) = resolve_position(&ellipse.position, w, h, ox, oy);
+    let rx = resolve_shape_radius(&ellipse.semiaxis_x, w, h, cx - ox, cy - oy);
+    let ry = resolve_shape_radius(&ellipse.semiaxis_y, h, w, cy - oy, cx - ox);
+    (Point::new(cx, cy), Vec2::new(rx, ry))
+}
+
+/// The rectangle of an `inset()` in `reference_box`, or `None` when it is empty.
+fn inset_rect(inset: &InsetRect, reference_box: ReferenceBox) -> Option<Rect> {
+    let ReferenceBox {
+        x: ox,
+        y: oy,
+        width: w,
+        height: h,
+    } = reference_box;
+    let top = resolve_lp(&inset.rect.0, h);
+    let right = resolve_lp(&inset.rect.1, w);
+    let bottom = resolve_lp(&inset.rect.2, h);
+    let left = resolve_lp(&inset.rect.3, w);
+
+    let x0 = ox + left;
+    let y0 = oy + top;
+    let x1 = ox + w - right;
+    let y1 = oy + h - bottom;
+
+    (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1, y1))
+}
+
+/// Convert a CSS basic-shape to a kurbo BezPath
+fn basic_shape_to_path(shape: &BasicShape, reference_box: ReferenceBox) -> Option<BezPath> {
+    let w = reference_box.width;
+    let h = reference_box.height;
+    let ox = reference_box.x;
+    let oy = reference_box.y;
+
+    match shape {
+        GenericBasicShape::Circle(circle) => {
+            let (center, r) = circle_geometry(circle, reference_box);
+            Some(Circle::new(center, r).into_path(0.1))
+        }
+        GenericBasicShape::Ellipse(ellipse) => {
+            let (center, radii) = ellipse_geometry(ellipse, reference_box);
+            Some(Ellipse::new(center, radii, 0.0).into_path(0.1))
+        }
+        GenericBasicShape::Polygon(polygon) => {
+            let mut path = BezPath::new();
+            let coords = &polygon.coordinates;
+
+            if coords.is_empty() {
+                return None;
+            }
+
+            for (i, coord) in coords.iter().enumerate() {
+                let x = ox + resolve_lp(&coord.0, w);
+                let y = oy + resolve_lp(&coord.1, h);
+                if i == 0 {
+                    path.move_to(Point::new(x, y));
+                } else {
+                    path.line_to(Point::new(x, y));
+                }
+            }
+            path.close_path();
+
+            Some(path)
+        }
+        GenericBasicShape::Rect(inset) => {
+            // TODO: Support border-radius on inset()
+            inset_rect(inset, reference_box).map(|rect| rect.into_path(0.1))
+        }
+        GenericBasicShape::PathOrShape(path_or_shape) => match path_or_shape {
+            GenericPathOrShapeFunction::Path(path) => {
+                svg_path_to_bezpath(path.commands(), |v| *v as f64, |v| *v as f64, |v| *v as f64)
+                    .map(|mut p| {
+                        p.apply_affine(kurbo::Affine::translate((ox, oy)));
+                        p
+                    })
+            }
+            GenericPathOrShapeFunction::Shape(shape) => svg_path_to_bezpath(
+                &shape.commands,
+                move |v: &LengthPercentage| v.resolve(CSSPixelLength::new(w as f32)).px() as f64,
+                move |v: &LengthPercentage| v.resolve(CSSPixelLength::new(h as f32)).px() as f64,
+                move |v: &Angle| v.degrees() as f64,
+            )
+            .map(|mut p| {
+                p.apply_affine(kurbo::Affine::translate((ox, oy)));
+                p
+            }),
+        },
     }
 }
 

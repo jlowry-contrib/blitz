@@ -149,6 +149,9 @@ pub struct BlitzDomPainter<'dom, 'a> {
     /// Glass nodes whose elliptical corners have been logged as rounded down.
     #[cfg(feature = "tracing")]
     pub(crate) glass_radii_logged: RefCell<HashSet<NodeId>>,
+    /// Glass nodes whose evenodd clip path has been logged as filled nonzero.
+    #[cfg(feature = "tracing")]
+    pub(crate) glass_fill_rule_logged: RefCell<HashSet<NodeId>>,
 }
 
 impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
@@ -192,22 +195,25 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             glass_invalid_logged: RefCell::default(),
             #[cfg(feature = "tracing")]
             glass_radii_logged: RefCell::default(),
+            #[cfg(feature = "tracing")]
+            glass_fill_rule_logged: RefCell::default(),
         }
     }
 
-    /// The glass shape `id` of the element `node_id`, whose border box is `frame`, if it draws one.
+    /// The glass shape `id` of `node`, whose border box is `frame`, if it draws one.
+    ///
+    /// Its `clip-path`, if it is a basic shape, gives the shape, unless the morph overrides
+    /// replace it.
     fn glass_shape(
         &self,
-        #[cfg_attr(
-            not(feature = "tracing"),
-            expect(unused_variables, reason = "only the glass logs name the node")
-        )]
-        node_id: NodeId,
+        node: &Node,
         frame: &CssBox,
         transform: Affine,
         props: &GlassProps,
         id: u32,
     ) -> Option<GlassShape> {
+        #[cfg(feature = "tracing")]
+        let node_id = node.id;
         #[cfg(feature = "tracing")]
         if !props.invalid.is_empty() && self.glass_invalid_logged.borrow_mut().insert(node_id) {
             tracing::warn!(
@@ -217,19 +223,27 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 "unregistered glass properties didn't parse and read as their defaults"
             );
         }
-        let shape = glass::glass_shape(frame, props, transform, self.scale, id)?;
+        let clip = node
+            .primary_styles()
+            .and_then(|style| clip_path::glass_clip(style.get_clip_path(), frame, self.scale));
+        let built = glass::glass_shape(frame, clip, props, transform, self.scale, id)?;
         #[cfg(feature = "tracing")]
-        if matches!(shape.kind, anyrender::glass::ShapeKind::RoundedRect { .. })
-            && glass::has_elliptical_corner(frame)
-            && self.glass_radii_logged.borrow_mut().insert(node_id)
-        {
+        if built.rounded_elliptical && self.glass_radii_logged.borrow_mut().insert(node_id) {
             tracing::warn!(
                 name: "blitz.glass.elliptical_radii",
                 node = %node_id,
                 "glass takes the smaller radius of each elliptical corner"
             );
         }
-        Some(shape)
+        #[cfg(feature = "tracing")]
+        if built.evenodd && self.glass_fill_rule_logged.borrow_mut().insert(node_id) {
+            tracing::warn!(
+                name: "blitz.glass.fill_rule",
+                node = %node_id,
+                "glass fills an evenodd clip path with the nonzero rule"
+            );
+        }
+        Some(built.shape)
     }
 
     /// The glass groups `node` emits.
@@ -261,7 +275,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         let mut members = Vec::new();
         if let Some(props) = own_props
-            && let Some(shape) = self.glass_shape(node.id, frame, transform, &props, 0)
+            && let Some(shape) = self.glass_shape(node, frame, transform, &props, 0)
         {
             members.push((shape, props.union));
         }
@@ -345,7 +359,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         {
             let frame = self.css_box(node, &styles, node.final_layout());
             let id = members.len() as u32;
-            if let Some(shape) = self.glass_shape(node_id, &frame, transform, &props, id) {
+            if let Some(shape) = self.glass_shape(node, &frame, transform, &props, id) {
                 self.glass_collected.borrow_mut().insert(node_id);
                 members.push((shape, props.union));
                 collected = true;

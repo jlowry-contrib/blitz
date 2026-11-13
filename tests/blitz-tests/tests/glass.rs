@@ -1155,3 +1155,150 @@ fn positioned_glass_joins_a_static_container() {
     assert_eq!(sizes(groups[1]), [(0, 14.0)]);
     assert_lands_on_fill(&scene, &groups[1].shapes[0], [0.0, 1.0, 1.0]);
 }
+
+/// A 100×40 glass box with `extra` style, painted blue, and its one glass shape.
+fn clipped(extra: &str) -> (Scene, GlassShape) {
+    let scene = scene_for(&format!(
+        "<div style='margin:7px 0 0 13px; width:100px; height:40px; --glass:regular; \
+         background:#0000ff; {extra}'></div>"
+    ));
+    let shape = only_shape(&scene);
+    (scene, shape)
+}
+
+#[test]
+fn inset_clip_path_gives_a_rounded_rect() {
+    let (_, shape) = clipped("clip-path:inset(5px 10px round 6px)");
+    assert_eq!(
+        shape.kind,
+        ShapeKind::RoundedRect {
+            rect: Rect::new(10.0, 5.0, 90.0, 35.0),
+            radii: RoundedRectRadii::from_single_radius(6.0),
+            corner: CornerStyle::Circular,
+        }
+    );
+    // Radii that overlap scale down together, as css-backgrounds-3 §5.5 has it.
+    let (_, shape) = clipped("clip-path:inset(0 round 50px)");
+    assert_eq!(
+        shape.kind,
+        ShapeKind::RoundedRect {
+            rect: Rect::new(0.0, 0.0, 100.0, 40.0),
+            radii: RoundedRectRadii::from_single_radius(20.0),
+            corner: CornerStyle::Circular,
+        }
+    );
+}
+
+#[test]
+fn circle_clip_path_gives_an_ellipse() {
+    let (scene, shape) = clipped("clip-path:circle(closest-side)");
+    assert_eq!(
+        shape.kind,
+        ShapeKind::Ellipse(Rect::new(30.0, 0.0, 70.0, 40.0))
+    );
+    // The glass sits inside the clip-path layer, in its usual place before the background.
+    let glass = glass_index(&scene);
+    let clip = scene.commands[..glass]
+        .iter()
+        .rposition(|cmd| {
+            matches!(
+                cmd,
+                RenderCommand::PushLayer(_) | RenderCommand::PushClipLayer(_)
+            )
+        })
+        .expect("no clip-path layer");
+    assert_eq!(depth_at(&scene, glass), depth_at(&scene, clip) + 1);
+    assert_eq!(glass + 1, fill_index(&scene, BLUE), "{:#?}", scene.commands);
+
+    let (_, shape) = clipped("clip-path:ellipse(20px 10px at 30px 20px)");
+    assert_eq!(
+        shape.kind,
+        ShapeKind::Ellipse(Rect::new(10.0, 10.0, 50.0, 30.0))
+    );
+}
+
+#[test]
+fn path_clip_path_shares_the_rect_space() {
+    let transform = "transform:translate(5px, 3px) rotate(10deg)";
+    let (_, plain) = clipped(transform);
+    let ShapeKind::RoundedRect { rect, .. } = plain.kind else {
+        panic!("{:?}", plain.kind)
+    };
+
+    for clip in [
+        "path(\"M0 0 H100 V40 H0 Z\")",
+        "polygon(0 0, 100% 0, 100% 100%, 0 100%)",
+        "shape(from 0 0, hline to 100%, vline to 100%, hline to 0, close)",
+    ] {
+        let (scene, shape) = clipped(&format!("{transform}; clip-path:{clip}"));
+        let ShapeKind::Path(path) = &shape.kind else {
+            panic!("{clip}: {:?}", shape.kind)
+        };
+        assert_eq!(path.bounding_box(), rect, "{clip}");
+        assert_eq!(shape.transform, plain.transform, "{clip}");
+        assert_lands_on_fill(&scene, &shape, BLUE);
+    }
+
+    // The path keeps its own CSS px offset, never scaled to device px.
+    let (_, shape) = clipped("clip-path:path(\"M10 5 L90 5 L50 35 Z\")");
+    let ShapeKind::Path(path) = &shape.kind else {
+        panic!("{:?}", shape.kind)
+    };
+    assert_eq!(path.bounding_box(), Rect::new(10.0, 5.0, 90.0, 35.0));
+}
+
+#[test]
+fn evenodd_path_is_emitted_nonzero() {
+    let d = "M0 0 H100 V40 H0 Z M20 10 H80 V30 H20 Z";
+    let (_, nonzero) = clipped(&format!("clip-path:path(\"{d}\")"));
+    let (_, evenodd) = clipped(&format!("clip-path:path(evenodd, \"{d}\")"));
+    assert!(
+        matches!(evenodd.kind, ShapeKind::Path(_)),
+        "{:?}",
+        evenodd.kind
+    );
+    assert_eq!(evenodd.kind, nonzero.kind);
+}
+
+#[test]
+fn geometry_overrides_replace_the_box() {
+    let morph = |r: &str| {
+        shape_of(&format!(
+            "width:100px; height:20px; border-radius:3px; --glass:regular; \
+             --glass-x:50px; --glass-y:10px; --glass-w:40px; --glass-h:10px; --glass-r:{r}"
+        ))
+    };
+    let plain = shape_of("width:100px; height:20px; --glass:regular");
+
+    let shape = morph("5px");
+    assert_eq!(
+        shape.kind,
+        ShapeKind::Capsule(Rect::new(30.0, 5.0, 70.0, 15.0))
+    );
+    assert_eq!(shape.transform, plain.transform);
+
+    assert_eq!(
+        morph("2px").kind,
+        ShapeKind::RoundedRect {
+            rect: Rect::new(30.0, 5.0, 70.0, 15.0),
+            radii: RoundedRectRadii::from_single_radius(2.0),
+            corner: CornerStyle::Circular,
+        }
+    );
+}
+
+#[test]
+fn overrides_need_a_positive_size() {
+    let own = ShapeKind::RoundedRect {
+        rect: Rect::new(0.0, 0.0, 100.0, 20.0),
+        radii: RoundedRectRadii::from_single_radius(4.0),
+        corner: CornerStyle::Circular,
+    };
+    for size in ["--glass-w:0px; --glass-h:10px", "--glass-w:40px", ""] {
+        let shape = shape_of(&format!(
+            "width:100px; height:20px; border-radius:4px; --glass:regular; \
+             --glass-x:50px; --glass-y:10px; --glass-r:5px; {size}"
+        ));
+        assert_eq!(shape.kind, own, "{size}");
+    }
+}
