@@ -21,7 +21,7 @@ use crate::{
 };
 use bitflags::bitflags;
 use blitz_traits::devtools::DevtoolSettings;
-use blitz_traits::events::{DomEvent, HitResult, UiEvent};
+use blitz_traits::events::{BlitzPointerId, DomEvent, HitResult, UiEvent};
 use blitz_traits::navigation::{DummyNavigationProvider, NavigationProvider};
 use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::node_id::NodeId;
@@ -368,6 +368,8 @@ pub struct BaseDocument {
     pub(crate) active_node_id: Option<NodeId>,
     /// The node which recieved a mousedown event (if any)
     pub(crate) mousedown_node_id: Option<NodeId>,
+    /// The node each captured pointer's events are retargeted to
+    pub(crate) pointer_captures: HashMap<BlitzPointerId, NodeId>,
     /// The time stamp, in seconds, of the last mousedown (for double-click detection)
     pub(crate) last_mousedown_time: Option<f64>,
     /// The position where mousedown occurred (for selection drags and double-click detection)
@@ -592,6 +594,7 @@ impl BaseDocument {
             focus_node_id: None,
             active_node_id: None,
             mousedown_node_id: None,
+            pointer_captures: HashMap::new(),
             has_active_animations: false,
             subdoc_is_animating: false,
             has_canvas: false,
@@ -1085,6 +1088,8 @@ impl BaseDocument {
         if self.mousedown_node_id == Some(node_id) {
             self.mousedown_node_id = None;
         }
+        self.pointer_captures
+            .retain(|_, captured| *captured != node_id);
         if self.text_selection.anchor.node_or_parent == Some(node_id)
             || self.text_selection.focus.node_or_parent == Some(node_id)
         {
@@ -2165,6 +2170,56 @@ impl BaseDocument {
 
     pub fn get_mousedown_node_id(&self) -> Option<NodeId> {
         self.mousedown_node_id
+    }
+
+    /// Retarget `pointer_id`'s events to `node` until the pointer lifts or the capture is released.
+    ///
+    /// Hover and `:active` keep following the hit test. A node outside the document is ignored.
+    pub fn set_pointer_capture(&mut self, pointer_id: BlitzPointerId, node: NodeId) {
+        if self
+            .get_node(node)
+            .is_some_and(|node| node.flags.is_in_document())
+        {
+            self.pointer_captures.insert(pointer_id, node);
+        }
+    }
+
+    /// Return `pointer_id`'s events to the hit-tested target.
+    pub fn release_pointer_capture(&mut self, pointer_id: BlitzPointerId) {
+        self.pointer_captures.remove(&pointer_id);
+    }
+
+    /// The node capturing `pointer_id`, releasing the capture if that node is no longer rendered.
+    pub(crate) fn pointer_capture_target(&mut self, pointer_id: BlitzPointerId) -> Option<NodeId> {
+        let node_id = *self.pointer_captures.get(&pointer_id)?;
+        if self.is_rendered(node_id) {
+            Some(node_id)
+        } else {
+            self.pointer_captures.remove(&pointer_id);
+            None
+        }
+    }
+
+    /// Whether `node_id` is in the document with no `display: none` element on its chain.
+    fn is_rendered(&self, node_id: NodeId) -> bool {
+        let mut current = Some(node_id);
+        while let Some(id) = current {
+            let Some(node) = self.get_node(id) else {
+                return false;
+            };
+            if !node.flags.is_in_document() {
+                return false;
+            }
+            if node.is_element()
+                && !node
+                    .primary_styles()
+                    .is_some_and(|style| !style.get_box().display.is_none())
+            {
+                return false;
+            }
+            current = node.parent;
+        }
+        true
     }
 
     pub fn set_viewport(&mut self, viewport: Viewport) {

@@ -214,7 +214,23 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
             _ => {}
         };
 
-        let target = match event {
+        // A captured pointer's events go to the capturing node instead of the hit test. A
+        // finger starts a new gesture, so its pointerdown is always hit-tested.
+        let captured_target = match &event {
+            UiEvent::PointerDown(data) if data.is_finger() => None,
+            UiEvent::PointerDown(data)
+            | UiEvent::PointerMove(data)
+            | UiEvent::PointerUp(data)
+            | UiEvent::PointerCancel(data) => self.doc.inner_mut().pointer_capture_target(data.id),
+            _ => None,
+        };
+        let (implicit_capture, release_capture) = match &event {
+            UiEvent::PointerDown(data) if data.is_finger() => (Some(data.id), None),
+            UiEvent::PointerUp(data) | UiEvent::PointerCancel(data) => (None, Some(data.id)),
+            _ => (None, None),
+        };
+
+        let target = captured_target.or(match event {
             UiEvent::PointerMove(_) => hover_node_id,
             UiEvent::PointerUp(_) => hover_node_id,
             UiEvent::PointerDown(_) => hover_node_id,
@@ -226,13 +242,19 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
             UiEvent::Ime(_) => focussed_node_id,
             UiEvent::Paste(_) => focussed_node_id,
             UiEvent::AppleStandardKeybinding(_) => focussed_node_id,
-        };
+        });
         // Fall back to the root element. A document without a root element (e.g. an
         // empty iframe sub-document) has no event target, so there is nothing to do.
         let Some(target) = target.or_else(|| self.doc.inner().try_root_element().map(|el| el.id))
         else {
             return;
         };
+
+        // A finger is captured implicitly by the element it presses, before pointerdown is
+        // dispatched so that a handler can release or move the capture.
+        if let Some(pointer_id) = implicit_capture {
+            self.doc.inner_mut().set_pointer_capture(pointer_id, target);
+        }
 
         match event {
             UiEvent::PointerMove(data) => {
@@ -302,6 +324,11 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 self.process_queue();
             }
         };
+
+        // Capture ends once the pointer lifts or is cancelled
+        if let Some(pointer_id) = release_capture {
+            self.doc.inner_mut().release_pointer_capture(pointer_id);
+        }
 
         // Update document input state (hover, focus, active, etc)
         if let Some(event) = hover_end_event {
