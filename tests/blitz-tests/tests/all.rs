@@ -30,6 +30,7 @@ mod focusability_updates;
 mod font_element_attributes;
 mod fragment_navigation;
 mod frame_clock;
+mod frame_time;
 mod harness_render;
 mod harness_smoke;
 mod hidden_checkbox_input;

@@ -15,7 +15,9 @@ use crate::DioxusNativeWindowRenderer;
 #[cfg(feature = "devtools")]
 use crate::KeyboardShortcut;
 use crate::event_handlers::WindowEventHandlers;
-use crate::{BlitzShellEvent, DioxusDocument, WindowConfig, contexts::DioxusNativeDocument};
+use crate::{
+    BlitzShellEvent, DioxusDocument, FrameClock, WindowConfig, contexts::DioxusNativeDocument,
+};
 #[cfg(feature = "devtools")]
 use winit::keyboard::{ModifiersState, PhysicalKey};
 
@@ -200,7 +202,13 @@ impl ApplicationHandler for DioxusNativeApplication {
             let winit_window = Arc::clone(&window.window);
             let renderer = window.renderer.clone();
             let window_id = window.window_id();
+            let frame_clock = window.frame_clock().map(FrameClock::new);
             let doc = window.downcast_doc_mut::<DioxusDocument>();
+
+            // Add the manual frame clock, which marks the window as running on it
+            if let Some(frame_clock) = frame_clock {
+                doc.vdom.provide_root_context(frame_clock);
+            }
 
             doc.vdom.in_scope(ScopeId::ROOT, || {
                 let shared: Rc<dyn dioxus_document::Document> = Rc::new(DioxusNativeDocument::new(

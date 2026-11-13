@@ -264,7 +264,8 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
     #[cfg(feature = "devtools")]
     let devtools_shortcuts = std::mem::take(&mut config.devtools_shortcuts);
     let config =
-        WindowConfig::with_attributes(Box::new(doc) as _, renderer, config.window_attributes);
+        WindowConfig::with_attributes(Box::new(doc) as _, renderer, config.window_attributes)
+            .with_time_source(config.time_source);
 
     // Create application
     #[allow(unused_mut)]

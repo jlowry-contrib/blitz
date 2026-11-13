@@ -19,7 +19,6 @@ pub struct Config {
     #[cfg_attr(not(feature = "devtools"), allow(dead_code))]
     pub(crate) devtools_shortcuts: Vec<KeyboardShortcut>,
     pub(crate) asset_handler: Option<AssetHandler>,
-    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
     pub(crate) time_source: TimeSource,
     #[cfg(feature = "vello")]
     pub(crate) glass_backend: Option<Box<dyn anyrender_vello::glass::GlassBackend + Send>>,
@@ -156,7 +155,7 @@ impl Config {
         self
     }
 
-    /// Set the clock that drives frames; [`TimeSource::Manual`] currently runs on the wall clock.
+    /// Set the clock that drives frames; on [`TimeSource::Manual`], only a `FrameClock` draws.
     pub fn with_time_source(mut self, time_source: TimeSource) -> Self {
         self.time_source = time_source;
         self

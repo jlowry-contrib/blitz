@@ -116,11 +116,13 @@ impl<D: Document> Harness<D> {
     }
 
     /// Begin a frame at the current frame time, poll pending async work (e.g. the Dioxus
-    /// VirtualDom) and resolve style/layout. Doesn't count a frame.
+    /// VirtualDom), resolve style/layout and flush the events queued meanwhile. Doesn't count
+    /// a frame.
     pub fn pump(&mut self) {
         self.doc.begin_frame(self.frame_time);
         self.doc.poll(None);
         self.doc.inner_mut().resolve(self.frame_time.t);
+        self.doc.flush_queued_events();
     }
 
     /// Advance the animation clock by `dt_seconds`, counting one frame, and [`pump`](Self::pump)

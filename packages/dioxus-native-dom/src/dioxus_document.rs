@@ -11,10 +11,13 @@ use blitz_dom::{
     EventHandler, Node,
 };
 use blitz_traits::events::{DomEvent, DomEventData, EventState, UiEvent};
-use dioxus_core::{ElementId, Event, VirtualDom};
+use blitz_traits::shell::FrameTime;
+use dioxus_core::{ElementId, Event, ScopeId, VirtualDom};
 use dioxus_html::{PlatformEventData, set_event_converter};
+use dioxus_signals::{ReadSignal, ReadableExt, Signal, WritableExt};
 use futures_util::task::noop_waker;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::fmt;
 use std::future::Future;
 use std::mem;
 use std::pin::pin;
@@ -34,6 +37,33 @@ fn get_dioxus_id(node: &Node) -> Option<ElementId> {
         .find(|attr| *attr.name.local == *"data-dioxus-id")
         .and_then(|attr| attr.value.parse::<usize>().ok())
         .map(ElementId::from_raw)
+}
+
+/// The frame state a [`DioxusDocument`] shares with its components as a root context.
+#[derive(Clone)]
+pub struct FrameState {
+    time: Signal<FrameTime>,
+    requested: Rc<Cell<bool>>,
+}
+
+impl FrameState {
+    /// Returns the signal holding the current frame's time, written before each render.
+    pub fn time(&self) -> ReadSignal<FrameTime> {
+        ReadSignal::new(self.time)
+    }
+
+    /// Asks the document for one more frame.
+    pub fn request_frame(&self) {
+        self.requested.set(true);
+    }
+}
+
+impl fmt::Debug for FrameState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameState")
+            .field("requested", &self.requested.get())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Integrates [`BaseDocument`] from  [`blitz-dom`](blitz_dom)  with [`VirtualDom`] from [`dioxus-core`](dioxus_core)
@@ -68,6 +98,7 @@ pub struct DioxusDocument {
     pub inner: Rc<RefCell<BaseDocument>>,
     pub vdom: VirtualDom,
     pub vdom_state: DioxusState,
+    frame_state: FrameState,
 
     #[allow(unused)]
     pub(crate) html_element_id: NodeId,
@@ -128,9 +159,15 @@ impl DioxusDocument {
         drop(mutr);
 
         let vdom_state = DioxusState::create(main_element_id);
+        let frame_state = FrameState {
+            time: vdom.in_scope(ScopeId::ROOT, || Signal::new(FrameTime::default())),
+            requested: Rc::new(Cell::new(false)),
+        };
+        vdom.provide_root_context(frame_state.clone());
         Self {
             vdom,
             vdom_state,
+            frame_state,
             inner: Rc::new(RefCell::new(doc)),
             html_element_id,
             head_element_id,
@@ -249,6 +286,21 @@ impl Document for DioxusDocument {
         self.flush_queued_mounted_events();
 
         true
+    }
+
+    /// Sets the document's frame time, then writes it to the frame-time signal.
+    fn begin_frame(&mut self, time: FrameTime) {
+        self.inner.borrow_mut().set_frame_time(time);
+        let mut signal = self.frame_state.time;
+        self.vdom.in_runtime(|| {
+            if *signal.peek() != time {
+                signal.set(time);
+            }
+        });
+    }
+
+    fn take_frame_request(&mut self) -> bool {
+        self.frame_state.requested.replace(false)
     }
 
     fn handle_ui_event(&mut self, event: UiEvent) {
