@@ -8,7 +8,7 @@ use std::task::{Context, Waker};
 
 use anyrender::WindowRenderer;
 use blitz_dom::Document;
-use blitz_traits::shell::{FrameTime, Presented};
+use blitz_traits::shell::{ColorScheme, FrameTime, Presented};
 use web_time::Instant;
 use winit::window::WindowId;
 
@@ -113,6 +113,10 @@ impl fmt::Debug for FrameClock {
     }
 }
 
+/// Called before each painted frame with the renderer, the frame time, the document scale
+/// and the colour scheme.
+pub type FrameHook<R> = Box<dyn FnMut(&mut R, FrameTime, f64, ColorScheme)>;
+
 /// What the window should do once a frame has run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameOutcome {
@@ -128,6 +132,7 @@ pub struct FrameScheduler<D: Document + ?Sized, R: WindowRenderer> {
     has_run: bool,
     steps: VecDeque<(f64, StepAck)>,
     waker: Option<Waker>,
+    frame_hook: Option<FrameHook<R>>,
     _types: PhantomData<fn(&mut D, &mut R)>,
 }
 
@@ -141,6 +146,7 @@ impl<D: Document + ?Sized, R: WindowRenderer> FrameScheduler<D, R> {
             has_run: false,
             steps: VecDeque::new(),
             waker: None,
+            frame_hook: None,
             _types: PhantomData,
         }
     }
@@ -168,6 +174,11 @@ impl<D: Document + ?Sized, R: WindowRenderer> FrameScheduler<D, R> {
         self.waker = waker;
     }
 
+    /// Sets the hook that each painted frame calls just before `paint`.
+    pub fn set_frame_hook(&mut self, hook: Option<FrameHook<R>>) {
+        self.frame_hook = hook;
+    }
+
     /// Returns whether steps are waiting for a frame.
     pub fn has_pending_steps(&self) -> bool {
         !self.steps.is_empty()
@@ -190,7 +201,7 @@ impl<D: Document + ?Sized, R: WindowRenderer> FrameScheduler<D, R> {
     /// Runs one frame: advances the clock, polls, resolves, flushes events, then paints.
     ///
     /// `paint` runs only when `can_paint` is true and the document isn't waiting on
-    /// render-blocking resources. The step this frame runs, if any, is acknowledged after
+    /// render-blocking resources, after the frame hook. The step this frame runs, if any, is acknowledged after
     /// `paint` returns.
     pub fn frame(
         &mut self,
@@ -212,6 +223,13 @@ impl<D: Document + ?Sized, R: WindowRenderer> FrameScheduler<D, R> {
 
         let painted = can_paint && !doc.inner().has_pending_critical_resources();
         if painted {
+            if let Some(hook) = &mut self.frame_hook {
+                let inner = doc.inner();
+                let viewport = inner.viewport();
+                let (scale, scheme) = (viewport.scale_f64(), viewport.color_scheme);
+                drop(inner);
+                hook(renderer, time, scale, scheme);
+            }
             paint(doc, renderer);
         }
         if let Some((_, ack)) = step {
@@ -269,7 +287,7 @@ mod tests {
     use super::*;
     use anyrender::{NullScenePainter, RenderContext, WindowHandle};
     use blitz_dom::{BaseDocument, DocGuard, DocGuardMut, Document, DocumentConfig, QualName, ns};
-    use blitz_traits::shell::{FrameTime, Presented};
+    use blitz_traits::shell::{ColorScheme, FrameTime, Presented, Viewport};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
@@ -601,6 +619,36 @@ mod tests {
 
         let mut fx = Fixture::with_doc(TimeSource::Wall, RecordingDoc::animating);
         assert!(fx.frame(true).request_redraw);
+    }
+
+    #[test]
+    fn frame_hook_runs_before_paint() {
+        let mut fx = Fixture::new(TimeSource::Manual);
+        fx.doc
+            .base
+            .set_viewport(Viewport::new(100, 100, 3.0, ColorScheme::Dark));
+        let log = fx.log.clone();
+        fx.scheduler
+            .set_frame_hook(Some(Box::new(move |_, time, scale, scheme| {
+                log.push(format!("hook {} {} {:?}", time.t, scale, scheme));
+            })));
+        fx.step(0.25);
+        fx.frame(true);
+        assert_eq!(
+            fx.log.take(),
+            [
+                "begin_frame 0.25 0.25 1",
+                "poll",
+                "resolve",
+                "flush",
+                "hook 0.25 3 Dark",
+                "paint",
+                "render"
+            ]
+        );
+
+        fx.frame(false);
+        assert!(!fx.log.take().iter().any(|entry| entry.starts_with("hook")));
     }
 
     #[test]

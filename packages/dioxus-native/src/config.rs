@@ -23,7 +23,6 @@ pub struct Config {
     #[cfg(feature = "vello")]
     pub(crate) glass_backend: Option<Box<dyn anyrender_vello::glass::GlassBackend + Send>>,
     #[cfg(feature = "vello")]
-    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
     pub(crate) glass_inputs: Option<GlassInputs>,
     #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
     pub(crate) safe_area: SafeArea,
@@ -171,7 +170,7 @@ impl Config {
         self
     }
 
-    /// Set the inputs the glass backend reads; currently stored but not yet read.
+    /// Set the accessibility settings the glass backend reads each frame.
     #[cfg(feature = "vello")]
     pub fn with_glass_inputs(mut self, inputs: GlassInputs) -> Self {
         self.glass_inputs = Some(inputs);

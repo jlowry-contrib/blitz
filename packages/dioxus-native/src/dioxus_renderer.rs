@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::{any::Any, cell::RefCell};
 
 use anyrender::{CompositeAlphaMode, RenderContext, RendererConfig, WindowRenderer};
+#[cfg(feature = "vello")]
+use blitz_traits::shell::{ColorScheme, FrameTime};
 use peniko::Color;
 
 // Renderer imports
@@ -52,11 +54,16 @@ pub struct RendererOptions {
     /// Glass backend installed into the Vello renderer.
     #[cfg(feature = "vello")]
     pub glass_backend: Option<Box<dyn anyrender_vello::glass::GlassBackend + Send>>,
+    /// Accessibility settings the glass backend reads each frame.
+    #[cfg(feature = "vello")]
+    pub glass_inputs: Option<crate::GlassInputs>,
 }
 
 #[derive(Clone)]
 pub struct DioxusNativeWindowRenderer {
     inner: Rc<RefCell<InnerRenderer>>,
+    #[cfg(feature = "vello")]
+    glass_inputs: crate::GlassInputs,
 }
 
 impl Default for DioxusNativeWindowRenderer {
@@ -105,7 +112,10 @@ impl DioxusNativeWindowRenderer {
                 if let Some(limits) = options.limits {
                     inner_options = inner_options.limits(limits);
                 }
-                #[allow(unused_mut)]
+                #[cfg_attr(
+                    not(feature = "vello"),
+                    expect(unused_mut, reason = "only the vello renderer takes a glass backend")
+                )]
                 let mut inner_renderer = InnerRenderer::with_options(inner_options);
                 #[cfg(feature = "vello")]
                 if let Some(backend) = options.glass_backend {
@@ -116,13 +126,18 @@ impl DioxusNativeWindowRenderer {
             }
         }
 
-        Self::with_inner_renderer(inner_renderer)
-    }
-
-    fn with_inner_renderer(inner_renderer: InnerRenderer) -> Self {
         Self {
             inner: Rc::new(RefCell::new(inner_renderer)),
+            #[cfg(feature = "vello")]
+            glass_inputs: options.glass_inputs.unwrap_or_default(),
         }
+    }
+
+    /// Passes the frame's time, scale and colour scheme to the glass backend.
+    #[cfg(feature = "vello")]
+    pub(crate) fn set_frame(&mut self, time: FrameTime, scale: f64, scheme: ColorScheme) {
+        let inputs = crate::glass::frame_inputs(time.t, scale, scheme, &self.glass_inputs);
+        self.inner.borrow_mut().set_glass_frame_inputs(inputs);
     }
 }
 

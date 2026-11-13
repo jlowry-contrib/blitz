@@ -5,7 +5,7 @@ use crate::convert_events::{
     winit_key_event_to_blitz, winit_modifiers_to_kbt_modifiers,
 };
 use crate::event::{BlitzShellEvent, BlitzShellProxy, create_waker};
-use crate::frame::{FrameClock, FrameScheduler, StepAck, TimeSource};
+use crate::frame::{FrameClock, FrameHook, FrameScheduler, StepAck, TimeSource};
 use anyrender::WindowRenderer;
 use blitz_dom::{BaseDocument, Document};
 use blitz_paint::paint_scene;
@@ -80,6 +80,7 @@ pub struct WindowConfig<Rend: WindowRenderer> {
     pub(crate) attributes: WindowAttributes,
     renderer: Rend,
     time_source: TimeSource,
+    frame_hook: Option<FrameHook<Rend>>,
 }
 
 impl<Rend: WindowRenderer> WindowConfig<Rend> {
@@ -97,12 +98,21 @@ impl<Rend: WindowRenderer> WindowConfig<Rend> {
             attributes,
             renderer,
             time_source: TimeSource::default(),
+            frame_hook: None,
         }
     }
 
     /// Sets the clock that drives the window's frames.
     pub fn with_time_source(mut self, time_source: TimeSource) -> Self {
         self.time_source = time_source;
+        self
+    }
+
+    /// Sets a hook that each painted frame calls just before painting.
+    ///
+    /// It receives the renderer, the frame time, the document scale and the colour scheme.
+    pub fn with_frame_hook(mut self, hook: FrameHook<Rend>) -> Self {
+        self.frame_hook = Some(hook);
         self
     }
 }
@@ -251,10 +261,13 @@ impl<Rend: WindowRenderer> View<Rend> {
 
         drop(inner);
 
+        let mut scheduler = FrameScheduler::new(config.time_source);
+        scheduler.set_frame_hook(config.frame_hook);
+
         Self {
             renderer: config.renderer,
             waker: None,
-            scheduler: FrameScheduler::new(config.time_source),
+            scheduler,
             keyboard_modifiers: Default::default(),
             proxy: proxy.clone(),
             window: winit_window.clone(),

@@ -255,6 +255,8 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
         limits,
         #[cfg(feature = "vello")]
         glass_backend: config.glass_backend.take(),
+        #[cfg(feature = "vello")]
+        glass_inputs: config.glass_inputs.take(),
     });
     #[cfg(not(any(feature = "vello", feature = "vello-hybrid")))]
     let renderer = DioxusNativeWindowRenderer::with_options(RendererOptions {
@@ -266,6 +268,12 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
     let config =
         WindowConfig::with_attributes(Box::new(doc) as _, renderer, config.window_attributes)
             .with_time_source(config.time_source);
+    #[cfg(feature = "vello")]
+    let config = config.with_frame_hook(Box::new(
+        |renderer: &mut DioxusNativeWindowRenderer, time, scale, scheme| {
+            renderer.set_frame(time, scale, scheme)
+        },
+    ));
 
     // Create application
     #[allow(unused_mut)]
