@@ -11,7 +11,9 @@ use focus::generate_focus_events;
 pub(crate) use ime::handle_ime_event;
 use keyboard::{KeyboardOrTextInputEvent, handle_key_or_input_event};
 pub(crate) use pointer::DragMode;
-use pointer::{handle_click, handle_pointerdown, handle_pointermove, handle_pointerup};
+use pointer::{
+    handle_click, handle_pointercancel, handle_pointerdown, handle_pointermove, handle_pointerup,
+};
 
 use crate::{BaseDocument, events::pointer::handle_wheel};
 
@@ -200,8 +202,9 @@ pub(crate) fn handle_dom_event<F: FnMut(DomEvent)>(
         DomEventData::MouseUp(_) => {
             // Do nothing (handled in PointerUp)
         }
-        DomEventData::PointerCancel(_) => {
-            // Do nothing (active state is reset in the event driver)
+        DomEventData::PointerCancel(event) => {
+            // The active state is reset in the event driver
+            handle_pointercancel(doc, event);
         }
         DomEventData::Click(event) => {
             handle_click(doc, target_node_id, event, &mut dispatch_event);

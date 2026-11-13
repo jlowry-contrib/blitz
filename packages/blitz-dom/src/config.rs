@@ -4,7 +4,7 @@ use blitz_traits::devtools::DevtoolsProvider;
 use blitz_traits::{
     navigation::NavigationProvider,
     net::{AbortSignal, NetProvider},
-    shell::{ShellProvider, Viewport},
+    shell::{ScrollPhysics, ShellProvider, Viewport},
 };
 use parley::FontContext;
 use std::sync::Arc;
@@ -68,6 +68,8 @@ pub struct DocumentConfig {
     /// How deeply this document is nested within other documents
     /// (0 for a root document). Used to limit `<iframe>` nesting depth.
     pub subdocument_depth: usize,
+    /// The physics that touch-driven scrolling follows. Defaults to [`ScrollPhysics::Default`].
+    pub scroll_physics: ScrollPhysics,
     /// Devtools provider notified of DOM mutations (e.g. by a remote inspector)
     #[cfg(feature = "devtools")]
     pub devtools_provider: Option<Arc<dyn DevtoolsProvider>>,
@@ -89,6 +91,7 @@ impl Default for DocumentConfig {
             incremental: None,
             abort_signal: None,
             subdocument_depth: 0,
+            scroll_physics: ScrollPhysics::Default,
             #[cfg(feature = "devtools")]
             devtools_provider: None,
         }

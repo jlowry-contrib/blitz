@@ -7,7 +7,7 @@ use crate::net::{
     Resource, ResourceHandler, ResourceLoadResponse, StylesheetHandler, StylesheetLoader,
 };
 use crate::node::{ImageData, NodeFlags, RasterImageData, SpecialElementData, Status, TextBrush};
-use crate::scrolling::ScrollAnimationState;
+use crate::scrolling::{ScrollAnimationState, ScrollTarget};
 use crate::selection::TextSelection;
 use crate::stylo_device::{DeviceChanges, make_device};
 use crate::stylo_to_cursor_icon::stylo_to_cursor_icon;
@@ -25,7 +25,7 @@ use blitz_traits::events::{BlitzPointerId, DomEvent, HitResult, UiEvent};
 use blitz_traits::navigation::{DummyNavigationProvider, NavigationProvider};
 use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::node_id::NodeId;
-use blitz_traits::shell::{DummyShellProvider, FrameTime, ShellProvider, Viewport};
+use blitz_traits::shell::{DummyShellProvider, FrameTime, ScrollPhysics, ShellProvider, Viewport};
 use cursor_icon::CursorIcon;
 use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, local_name};
@@ -329,6 +329,8 @@ pub struct BaseDocument {
     /// How deeply this document is nested within other documents
     /// (0 for a root document). Used to limit `<iframe>` nesting depth.
     pub(crate) subdocument_depth: usize,
+    /// The physics that touch-driven scrolling follows.
+    pub(crate) scroll_physics: ScrollPhysics,
 
     // Events
     pub(crate) tx: Sender<DocumentEvent>,
@@ -401,6 +403,8 @@ pub struct BaseDocument {
     pub(crate) frame_time: FrameTime,
     /// Whether and what kind of scroll animation is currently in progress
     pub(crate) scroll_animation: ScrollAnimationState,
+    /// The scroller whose iOS fling or bounce-back the current touch caught, to settle on release
+    pub(crate) ios_caught_scroller: Option<ScrollTarget>,
     /// The `scroll` events waiting for the frame's flush, at most one per target
     pub(crate) queued_events: Vec<DomEvent>,
 
@@ -592,6 +596,7 @@ impl BaseDocument {
             style_threading: config.style_threading,
             incremental_layout: config.incremental.unwrap_or(true),
             subdocument_depth: config.subdocument_depth,
+            scroll_physics: config.scroll_physics,
             devtool_settings: DevtoolSettings::default(),
             url: base_url,
             nodes_to_stylesheet: BTreeMap::new(),
@@ -644,6 +649,7 @@ impl BaseDocument {
             scrollbar_activity: HashMap::new(),
             frame_time: FrameTime::default(),
             scroll_animation: ScrollAnimationState::None,
+            ios_caught_scroller: None,
             queued_events: Vec::new(),
             text_selection: TextSelection::default(),
             scratch: DocumentScratch::default(),

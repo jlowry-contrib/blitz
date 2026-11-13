@@ -8,6 +8,7 @@ use blitz_traits::{
         DomEvent, DomEventData, MouseEventButton, MouseEventButtons,
     },
     navigation::NavigationOptions,
+    shell::ScrollPhysics,
 };
 use markup5ever::local_name;
 use style::values::computed::{Overflow, TouchAction, UserSelect};
@@ -17,7 +18,8 @@ use taffy::AbsoluteAxis;
 use crate::{
     BaseDocument,
     node::{ScrollbarRef, SpecialElementData},
-    scrolling::{FlingState, ScrollAnimationState},
+    scrolling::{FlingState, IosPan, ScrollAnimationState},
+    util::Point,
 };
 
 use super::focus::generate_focus_events;
@@ -32,6 +34,8 @@ pub(crate) struct PanState {
     /// Whether vertical panning is permitted by the `touch-action` property.
     pub(crate) allow_y: bool,
     pub(crate) samples: VecDeque<PanSample>,
+    /// The scroller and unclamped offset of a pan under the iOS scroll physics.
+    pub(crate) ios: Option<IosPan>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +156,34 @@ impl PanState {
 
         None
     }
+
+    /// The finger's velocity at release, in px/s, over the samples of the last 100 ms (the
+    /// window Blitz's own fling uses).
+    fn ios_release_velocity(&self, time_ms: f64) -> Point<f64> {
+        let idx = self
+            .samples
+            .partition_point(|sample| time_ms - sample.time > 100.0);
+        let Some(first) = self.samples.get(idx) else {
+            return Point::ZERO;
+        };
+        let elapsed_ms = time_ms - first.time;
+        if elapsed_ms <= 0.0 {
+            return Point::ZERO;
+        }
+        // Each sample's delta covers the interval before it, so the first one's falls outside
+        // the window.
+        let (dx, dy) = self
+            .samples
+            .iter()
+            .skip(idx + 1)
+            .fold((0.0, 0.0), |(dx, dy), sample| {
+                (dx + sample.dx as f64, dy + sample.dy as f64)
+            });
+        Point {
+            x: dx / elapsed_ms * 1000.0,
+            y: dy / elapsed_ms * 1000.0,
+        }
+    }
 }
 
 /// Compute which axes a touch pan gesture starting on `node_id` is allowed to scroll, according to
@@ -255,6 +287,7 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
                             allow_x,
                             allow_y,
                             samples: VecDeque::with_capacity(200),
+                            ios: doc.ios_pan_start(target, allow_x, allow_y),
                         });
                     }
                 }
@@ -267,6 +300,14 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
 
         let target = state.target;
         let (dx, dy) = state.update(time_ms, event.screen_x(), event.screen_y());
+
+        if let Some(mut pan) = state.ios {
+            let has_changed = doc.ios_pan_by(&mut pan, dx, dy, &mut dispatch_event);
+            if let DragMode::Panning(state) = &mut doc.drag_mode {
+                state.ios = Some(pan);
+            }
+            return has_changed;
+        }
 
         let has_changed = doc.scroll_chain_by(Some(target), dx, dy, &mut dispatch_event);
         return has_changed;
@@ -403,7 +444,12 @@ pub(crate) fn handle_pointerdown(
     doc.last_mousedown_time = Some(time_stamp);
     doc.mousedown_position = taffy::Point { x, y };
     doc.drag_mode = DragMode::None;
-    doc.scroll_animation = ScrollAnimationState::None;
+    // A touch catches an iOS fling or bounce-back where it is; the release settles it.
+    doc.ios_caught_scroller =
+        match std::mem::replace(&mut doc.scroll_animation, ScrollAnimationState::None) {
+            ScrollAnimationState::Ios(state) => Some(state.target),
+            _ => None,
+        };
 
     let Some(hit) = doc.hit(x, y) else {
         // Clear text selection when clicking outside any element
@@ -547,6 +593,21 @@ pub(crate) fn handle_pointerdown(
     }
 }
 
+/// Under the iOS physics, ends a cancelled pan or caught fling with no velocity, so an
+/// overscrolled scroller bounces back. The default physics do nothing here.
+pub(crate) fn handle_pointercancel(doc: &mut BaseDocument, event: &BlitzPointerEvent) {
+    if doc.scroll_physics != ScrollPhysics::Ios {
+        return;
+    }
+    if let DragMode::Panning(PanState { ios: Some(pan), .. }) = doc.drag_mode {
+        doc.drag_mode = DragMode::None;
+        doc.ios_release(pan.target, event.time_stamp, Point::ZERO);
+    }
+    if let Some(target) = doc.ios_caught_scroller.take() {
+        doc.ios_settle(target, event.time_stamp);
+    }
+}
+
 pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     doc: &mut BaseDocument,
     target: NodeId,
@@ -583,10 +644,19 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
     let time_ms = event.time_stamp * 1000.0;
 
     if let DragMode::Panning(state) = &drag_mode {
-        if let Some(fling) = state.generate_fling(time_ms) {
+        if let Some(pan) = state.ios {
+            let velocity = state.ios_release_velocity(time_ms);
+            doc.ios_release(pan.target, event.time_stamp, velocity);
+        } else if doc.scroll_physics == ScrollPhysics::Ios {
+            // A pan on text or a sub-document that scrolls its own content gets no fling
+            // under the iOS physics.
+        } else if let Some(fling) = state.generate_fling(time_ms) {
             doc.scroll_animation = ScrollAnimationState::Fling(fling);
             doc.shell_provider.request_redraw();
         }
+    }
+    if let Some(target) = doc.ios_caught_scroller.take() {
+        doc.ios_settle(target, event.time_stamp);
     }
 
     // Dispatch a click event

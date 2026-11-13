@@ -26,7 +26,6 @@ pub struct Config {
     pub(crate) glass_inputs: Option<GlassInputs>,
     #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
     pub(crate) safe_area: SafeArea,
-    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
     pub(crate) scroll_physics: ScrollPhysics,
 }
 
@@ -183,7 +182,7 @@ impl Config {
         self
     }
 
-    /// Set the physics of touch-driven scrolling; currently stored but not yet applied.
+    /// Set the physics that touch-driven scrolling follows in the document.
     pub fn with_scroll_physics(mut self, scroll_physics: ScrollPhysics) -> Self {
         self.scroll_physics = scroll_physics;
         self

@@ -6,6 +6,8 @@ use blitz_traits::node_id::NodeId;
 use style::values::computed::Overflow;
 use stylo_taffy::CopyStyleGetters;
 
+use blitz_traits::shell::ScrollPhysics;
+
 use crate::BaseDocument;
 use crate::util::Point;
 
@@ -109,6 +111,202 @@ pub(crate) enum ScrollAnimationState {
     Fling(FlingState),
     /// A smooth scroll of the viewport towards a target offset.
     ScrollTo(ScrollToState),
+    /// A touch release under [`ScrollPhysics::Ios`]: a fling, a bounce-back, or both in turn.
+    Ios(IosScrollState),
+}
+
+/// The fraction of its velocity an iOS fling keeps each millisecond: UIScrollView's
+/// `DecelerationRate.normal` (design, blitz-dom).
+const IOS_DECELERATION_RATE: f64 = 0.998;
+
+/// The rubber band's coefficient: the value commonly cited for UIScrollView's rubber band,
+/// `d · (1 − 1/(x·c/d + 1))` (design, blitz-dom).
+const IOS_RUBBER_BAND: f64 = 0.55;
+
+/// The response, in seconds, of the critically damped spring that returns an overscrolled
+/// offset to its end. This plan's choice, to be calibrated against the A08 and A09 captures
+/// in Plan 5.
+const IOS_BOUNCE_RESPONSE: f64 = 0.4;
+
+/// The speed, in px/s, below which a fling or a bounce-back stops (design, blitz-dom).
+const IOS_STOP_SPEED: f64 = 0.5;
+
+/// The distance, in px, from its end within which a slowed bounce-back snaps to the end:
+/// well under a device pixel at 3×.
+const IOS_SETTLE_DISTANCE: f64 = 0.01;
+
+/// The largest displayed overshoot a pan can catch, as a fraction of the scrollport's
+/// extent: the rubber band only approaches the full extent, so its inverse needs a margin.
+const IOS_MAX_CAUGHT_OVERSHOOT: f64 = 0.99;
+
+/// The displayed distance past an end for an overshoot `x` in a scrollport of `extent`.
+fn rubber_band(x: f64, extent: f64) -> f64 {
+    extent * (1.0 - 1.0 / (x * IOS_RUBBER_BAND / extent + 1.0))
+}
+
+/// The overshoot that displays as `y` past an end: the inverse of [`rubber_band`].
+fn rubber_band_inverse(y: f64, extent: f64) -> f64 {
+    let y = y.min(extent * IOS_MAX_CAUGHT_OVERSHOOT);
+    extent / IOS_RUBBER_BAND * (y / (extent - y))
+}
+
+/// How fast the displayed offset moves per unit of overshoot, at an overshoot `x`.
+fn rubber_band_slope(x: f64, extent: f64) -> f64 {
+    let denominator = x * IOS_RUBBER_BAND / extent + 1.0;
+    IOS_RUBBER_BAND / (denominator * denominator)
+}
+
+/// The displayed offset on one axis for a pan's unclamped offset `raw`.
+fn ios_displayed_offset(raw: f64, min: f64, max: f64, extent: f64) -> f64 {
+    if max <= min || extent <= 0.0 {
+        raw.clamp(min, max)
+    } else if raw < min {
+        min - rubber_band(min - raw, extent)
+    } else if raw > max {
+        max + rubber_band(raw - max, extent)
+    } else {
+        raw
+    }
+}
+
+/// The pan offset that displays as `offset` on one axis: the inverse of
+/// [`ios_displayed_offset`].
+fn ios_raw_offset(offset: f64, min: f64, max: f64, extent: f64) -> f64 {
+    if max <= min || extent <= 0.0 {
+        offset.clamp(min, max)
+    } else if offset < min {
+        min - rubber_band_inverse(min - offset, extent)
+    } else if offset > max {
+        max + rubber_band_inverse(offset - max, extent)
+    } else {
+        offset
+    }
+}
+
+/// The motion of one axis of an iOS scroll after the finger lifts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum IosAxisMotion {
+    /// The axis doesn't move.
+    Rest,
+    /// A fling whose velocity decays as `v₀ · 0.998^(1000·t)`.
+    Decelerate {
+        /// Frame time, in seconds, of the release.
+        start: f64,
+        /// The offset at release.
+        from: f64,
+        /// The velocity at release, in px/s.
+        velocity: f64,
+    },
+    /// A critically damped spring back to the end of the scroll range.
+    Bounce {
+        /// Frame time, in seconds, at which the spring starts.
+        start: f64,
+        /// The end the spring returns to.
+        end: f64,
+        /// The displacement from `end` at `start`.
+        from: f64,
+        /// The velocity at `start`, in px/s.
+        velocity: f64,
+    },
+}
+
+impl IosAxisMotion {
+    /// The motion of an axis released at `offset` with `velocity` px/s, at time `start`.
+    fn release(start: f64, offset: f64, velocity: f64, min: f64, max: f64) -> Self {
+        if offset < min || offset > max {
+            let end = offset.clamp(min, max);
+            Self::Bounce {
+                start,
+                end,
+                from: offset - end,
+                velocity,
+            }
+        } else if velocity.abs() < IOS_STOP_SPEED || max <= min {
+            Self::Rest
+        } else {
+            Self::Decelerate {
+                start,
+                from: offset,
+                velocity,
+            }
+        }
+    }
+
+    /// The offset at time `t`, or `None` while at rest, with the motion that continues from it.
+    fn sample(self, t: f64, min: f64, max: f64) -> (Option<f64>, Self) {
+        match self {
+            Self::Rest => (None, Self::Rest),
+            Self::Decelerate {
+                start,
+                from,
+                velocity,
+            } => {
+                let log_rate = 1000.0 * IOS_DECELERATION_RATE.ln();
+                let distance = |tau: f64| velocity * ((log_rate * tau).exp() - 1.0) / log_rate;
+                let elapsed = (t - start).max(0.0);
+                let stop = (IOS_STOP_SPEED / velocity.abs()).ln() / log_rate;
+
+                // When the fling reaches the end it heads towards, if it does before stopping.
+                let end = if velocity > 0.0 { max } else { min };
+                let reach = 1.0 + (end - from) * log_rate / velocity;
+                let crossing = (reach > 0.0)
+                    .then(|| reach.ln() / log_rate)
+                    .filter(|&tau| tau <= stop);
+
+                match crossing {
+                    Some(tau) if tau <= elapsed => {
+                        let bounce = Self::Bounce {
+                            start: start + tau,
+                            end,
+                            from: 0.0,
+                            velocity: velocity * (log_rate * tau).exp(),
+                        };
+                        bounce.sample(t, min, max)
+                    }
+                    _ if elapsed >= stop => (Some(from + distance(stop)), Self::Rest),
+                    _ => (Some(from + distance(elapsed)), self),
+                }
+            }
+            Self::Bounce {
+                start,
+                end,
+                from,
+                velocity,
+            } => {
+                let omega = std::f64::consts::TAU / IOS_BOUNCE_RESPONSE;
+                let elapsed = (t - start).max(0.0);
+                let b = velocity + omega * from;
+                let decay = (-omega * elapsed).exp();
+                let displacement = (from + b * elapsed) * decay;
+                let speed = (velocity - omega * b * elapsed) * decay;
+                if displacement.abs() < IOS_SETTLE_DISTANCE && speed.abs() < IOS_STOP_SPEED {
+                    (Some(end), Self::Rest)
+                } else {
+                    (Some(end + displacement), self)
+                }
+            }
+        }
+    }
+}
+
+/// The scroll animation that follows a touch release under [`ScrollPhysics::Ios`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct IosScrollState {
+    /// The scroller being moved.
+    pub(crate) target: ScrollTarget,
+    /// The horizontal motion.
+    pub(crate) x: IosAxisMotion,
+    /// The vertical motion.
+    pub(crate) y: IosAxisMotion,
+}
+
+/// The scroller a touch pan moves under [`ScrollPhysics::Ios`], with its unclamped offset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct IosPan {
+    /// The scroller the pan moves; the pan doesn't chain to its ancestors.
+    pub(crate) target: ScrollTarget,
+    /// The offset the finger has dragged to, before the rubber band.
+    pub(crate) raw: Point<f64>,
 }
 
 /// Cubic ease-in-out easing function, mapping a normalised time `t` in `[0, 1]`
@@ -138,6 +336,12 @@ impl BaseDocument {
             && matches!(self.scroll_animation, ScrollAnimationState::ScrollTo(_))
         {
             self.scroll_animation = ScrollAnimationState::None;
+        }
+        // Any other scroll ends an iOS fling or bounce-back, which would otherwise overwrite
+        // it on the next frame, and returns its scroller to its range.
+        if let ScrollAnimationState::Ios(state) = self.scroll_animation {
+            self.scroll_animation = ScrollAnimationState::None;
+            self.clamp_scroll_offset(state.target);
         }
 
         let target = self.canonical_scroll_target(request.target);
@@ -283,8 +487,11 @@ impl BaseDocument {
         }
     }
 
-    /// Write a scroll target's offset (which must already be clamped to its scrollable
-    /// range), dispatching a `scroll` event and returning whether the offset changed.
+    /// Write a scroll target's offset as given, dispatching a `scroll` event and returning
+    /// whether the offset changed.
+    ///
+    /// Callers clamp the offset to the scrollable range, except while the iOS physics
+    /// overscroll it.
     pub(crate) fn write_scroll_offset(
         &mut self,
         target: ScrollTarget,
@@ -773,9 +980,234 @@ impl BaseDocument {
                     self.scroll_animation = ScrollAnimationState::None;
                 }
             }
+            ScrollAnimationState::Ios(state) => {
+                let state = *state;
+                let (current, min, max) = self.scroll_state(state.target, false);
+                let (x, motion_x) = state.x.sample(self.frame_time.t, min.x, max.x);
+                let (y, motion_y) = state.y.sample(self.frame_time.t, min.y, max.y);
+                let offset = Point {
+                    x: x.unwrap_or(current.x),
+                    y: y.unwrap_or(current.y),
+                };
+
+                let mut events = Vec::new();
+                self.write_scroll_offset(state.target, offset, &mut |event| events.push(event));
+                self.queue_scroll_events(events);
+
+                self.scroll_animation =
+                    if motion_x == IosAxisMotion::Rest && motion_y == IosAxisMotion::Rest {
+                        ScrollAnimationState::None
+                    } else {
+                        ScrollAnimationState::Ios(IosScrollState {
+                            target: state.target,
+                            x: motion_x,
+                            y: motion_y,
+                        })
+                    };
+            }
             ScrollAnimationState::None => {
                 // Do nothing
             }
         }
+    }
+
+    /// The extent of a scroller's scrollport on each axis, which scales its rubber band.
+    fn scrollport_extent(&self, target: ScrollTarget) -> Point<f64> {
+        match self.canonical_scroll_target(target) {
+            ScrollTarget::Viewport => {
+                let scale = self.viewport.scale() as f64;
+                Point {
+                    x: self.viewport.window_size.0 as f64 / scale,
+                    y: self.viewport.window_size.1 as f64 / scale,
+                }
+            }
+            ScrollTarget::Node(node_id) => {
+                self.nodes.get(node_id).map_or(Point::ZERO, |node| Point {
+                    x: node.client_width() as f64,
+                    y: node.client_height() as f64,
+                })
+            }
+        }
+    }
+
+    /// The scroller an iOS pan starting on `node_id` moves: the nearest one in the scroll
+    /// chain with a scroll range on an allowed axis.
+    ///
+    /// Text inputs and sub-documents with no range of their own on an allowed axis are passed
+    /// over. Returns `None` under the default physics, and when the pan reaches a text input or
+    /// sub-document that can scroll its own content: those keep Blitz's chained scrolling.
+    pub(crate) fn ios_pan_start(
+        &self,
+        node_id: NodeId,
+        allow_x: bool,
+        allow_y: bool,
+    ) -> Option<IosPan> {
+        if self.scroll_physics != ScrollPhysics::Ios {
+            return None;
+        }
+
+        let mut target = Some(self.canonical_scroll_target(ScrollTarget::Node(node_id)));
+        while let Some(current) = target {
+            if let ScrollTarget::Node(id) = current {
+                if self.scrolls_own_content(id, allow_x, allow_y)? {
+                    return None;
+                }
+            }
+
+            let (offset, min, max) = self.scroll_state(current, false);
+            if (allow_x && max.x > min.x) || (allow_y && max.y > min.y) {
+                let extent = self.scrollport_extent(current);
+                return Some(IosPan {
+                    target: current,
+                    raw: Point {
+                        x: ios_raw_offset(offset.x, min.x, max.x, extent.x),
+                        y: ios_raw_offset(offset.y, min.y, max.y, extent.y),
+                    },
+                });
+            }
+            target = self
+                .next_scroller_in_chain(current)
+                .map(|next| self.canonical_scroll_target(next));
+        }
+        None
+    }
+
+    /// Whether a text input or sub-document can scroll its own content on an allowed axis,
+    /// or `None` when the node isn't in the document.
+    fn scrolls_own_content(&self, node_id: NodeId, allow_x: bool, allow_y: bool) -> Option<bool> {
+        let node = self.nodes.get(node_id)?;
+        if let Some(sub_doc) = node.subdoc() {
+            let (_, min, max) = sub_doc.inner().scroll_state(ScrollTarget::Viewport, false);
+            return Some((allow_x && max.x > min.x) || (allow_y && max.y > min.y));
+        }
+        let Some(input) = node.element_data().and_then(|el| el.text_input_data()) else {
+            return Some(false);
+        };
+        // Single-line inputs scroll their text horizontally, multi-line inputs vertically.
+        let allowed = if input.is_multiline { allow_y } else { allow_x };
+        let layout = node.final_layout();
+        let range =
+            input.max_scroll_offset(layout.content_box_width(), layout.content_box_height());
+        Some(allowed && range > 0.0)
+    }
+
+    /// Move an iOS pan's scroller by a finger delta, rubber-banding past either end.
+    pub(crate) fn ios_pan_by(
+        &mut self,
+        pan: &mut IosPan,
+        dx: f64,
+        dy: f64,
+        dispatch_event: &mut dyn FnMut(DomEvent),
+    ) -> bool {
+        // The finger moves the content, so the offset moves the opposite way.
+        pan.raw.x -= dx;
+        pan.raw.y -= dy;
+        let (_, min, max) = self.scroll_state(pan.target, false);
+        let extent = self.scrollport_extent(pan.target);
+        let offset = Point {
+            x: ios_displayed_offset(pan.raw.x, min.x, max.x, extent.x),
+            y: ios_displayed_offset(pan.raw.y, min.y, max.y, extent.y),
+        };
+        self.write_scroll_offset(pan.target, offset, dispatch_event)
+    }
+
+    /// Start the motion that follows an iOS release of `target` at `time` seconds, with the
+    /// finger moving at `velocity` px/s.
+    pub(crate) fn ios_release(&mut self, target: ScrollTarget, time: f64, velocity: Point<f64>) {
+        let (offset, min, max) = self.scroll_state(target, false);
+        let extent = self.scrollport_extent(target);
+        let x = Self::ios_axis_release(time, offset.x, velocity.x, min.x, max.x, extent.x);
+        let y = Self::ios_axis_release(time, offset.y, velocity.y, min.y, max.y, extent.y);
+        if x == IosAxisMotion::Rest && y == IosAxisMotion::Rest {
+            return;
+        }
+        self.scroll_animation = ScrollAnimationState::Ios(IosScrollState { target, x, y });
+        self.shell_provider.request_redraw();
+    }
+
+    /// Return a scroller caught by a touch to its scroll range once the finger lifts at
+    /// `time` seconds: it bounces back, or snaps when another scroll animation is running.
+    pub(crate) fn ios_settle(&mut self, target: ScrollTarget, time: f64) {
+        match &self.scroll_animation {
+            ScrollAnimationState::None => self.ios_release(target, time, Point::ZERO),
+            ScrollAnimationState::Ios(state) if state.target == target => {}
+            _ => self.clamp_scroll_offset(target),
+        }
+    }
+
+    /// Return a scroller left overscrolled by the iOS physics to its scroll range at once.
+    fn clamp_scroll_offset(&mut self, target: ScrollTarget) {
+        let (offset, min, max) = self.scroll_state(target, false);
+        let clamped = Point {
+            x: offset.x.clamp(min.x, max.x),
+            y: offset.y.clamp(min.y, max.y),
+        };
+        let mut events = Vec::new();
+        self.write_scroll_offset(target, clamped, &mut |event| events.push(event));
+        self.queue_scroll_events(events);
+    }
+
+    fn ios_axis_release(
+        time: f64,
+        offset: f64,
+        finger_velocity: f64,
+        min: f64,
+        max: f64,
+        extent: f64,
+    ) -> IosAxisMotion {
+        // The finger moves the content, so the offset moves the opposite way. Past an end the
+        // displayed offset moves only as fast as the rubber band lets it.
+        let overshoot = (min - offset).max(offset - max);
+        let velocity = if overshoot > 0.0 && extent > 0.0 {
+            -finger_velocity * rubber_band_slope(rubber_band_inverse(overshoot, extent), extent)
+        } else {
+            -finger_velocity
+        };
+        IosAxisMotion::release(time, offset, velocity, min, max)
+    }
+}
+
+#[cfg(test)]
+mod ios_tests {
+    use super::*;
+
+    #[test]
+    fn rubber_band_inverts() {
+        for x in [0.0, 1.0, 10.0, 100.0, 1000.0] {
+            let y = rubber_band(x, 200.0);
+            assert!((rubber_band_inverse(y, 200.0) - x).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn rubber_band_slope_matches_a_finite_difference() {
+        let (x, h) = (50.0, 1e-6);
+        let numeric = (rubber_band(x + h, 200.0) - rubber_band(x - h, 200.0)) / (2.0 * h);
+        assert!((rubber_band_slope(x, 200.0) - numeric).abs() < 1e-6);
+    }
+
+    #[test]
+    fn displayed_offset_bands_only_with_a_scroll_range() {
+        assert_eq!(ios_displayed_offset(50.0, 0.0, 100.0, 200.0), 50.0);
+        assert_eq!(ios_displayed_offset(-50.0, 0.0, 0.0, 200.0), 0.0);
+        assert!(ios_displayed_offset(-50.0, 0.0, 100.0, 200.0) < 0.0);
+    }
+
+    #[test]
+    fn fling_hands_over_to_the_bounce_at_the_end() {
+        let fling = IosAxisMotion::release(0.0, 90.0, 1000.0, 0.0, 100.0);
+        let (offset, motion) = fling.sample(0.2, 0.0, 100.0);
+        assert!(matches!(motion, IosAxisMotion::Bounce { end: 100.0, .. }));
+        assert!(offset.is_some_and(|offset| offset > 100.0));
+        let (offset, motion) = motion.sample(3.0, 0.0, 100.0);
+        assert_eq!((offset, motion), (Some(100.0), IosAxisMotion::Rest));
+    }
+
+    #[test]
+    fn slow_release_in_range_rests() {
+        assert_eq!(
+            IosAxisMotion::release(0.0, 50.0, 0.4, 0.0, 100.0),
+            IosAxisMotion::Rest
+        );
     }
 }
