@@ -507,6 +507,8 @@ pub struct BlitzPointerEvent {
     pub mods: Modifiers,
     pub details: PointerDetails,
     pub element: Point<f32>,
+    /// When the event happened, in seconds on the frame clock.
+    pub time_stamp: f64,
     /// All pointers that are currently active (pressed) on the surface, including
     /// the one that triggered this event.
     ///

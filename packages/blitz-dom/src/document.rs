@@ -25,7 +25,7 @@ use blitz_traits::events::{DomEvent, HitResult, UiEvent};
 use blitz_traits::navigation::{DummyNavigationProvider, NavigationProvider};
 use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::node_id::NodeId;
-use blitz_traits::shell::{DummyShellProvider, ShellProvider, Viewport};
+use blitz_traits::shell::{DummyShellProvider, FrameTime, ShellProvider, Viewport};
 use cursor_icon::CursorIcon;
 use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, local_name};
@@ -71,7 +71,6 @@ use style_dom::ElementState;
 use stylo_taffy::CopyStyleGetters;
 use thin_vec::ThinVec;
 use url::Url;
-use web_time::Instant;
 
 #[cfg(feature = "parallel-construct")]
 use thread_local::ThreadLocal;
@@ -236,6 +235,19 @@ pub trait Document: Any + 'static {
     fn id(&self) -> usize {
         self.inner().id
     }
+
+    /// Starts a frame at `time`; by default, sets it as the inner document's frame time.
+    fn begin_frame(&mut self, time: FrameTime) {
+        self.inner_mut().set_frame_time(time);
+    }
+
+    /// Takes the document's request for another frame; by default, there is none.
+    fn take_frame_request(&mut self) -> bool {
+        false
+    }
+
+    /// Dispatches the events queued while the frame was resolved; by default, there are none.
+    fn flush_queued_events(&mut self) {}
 }
 
 pub struct PlainDocument(pub BaseDocument);
@@ -356,8 +368,8 @@ pub struct BaseDocument {
     pub(crate) active_node_id: Option<NodeId>,
     /// The node which recieved a mousedown event (if any)
     pub(crate) mousedown_node_id: Option<NodeId>,
-    /// The last time a mousedown was made (for double-click detection)
-    pub(crate) last_mousedown_time: Option<Instant>,
+    /// The time stamp, in seconds, of the last mousedown (for double-click detection)
+    pub(crate) last_mousedown_time: Option<f64>,
     /// The position where mousedown occurred (for selection drags and double-click detection)
     pub(crate) mousedown_position: taffy::Point<f32>,
     /// How many clicks have been made in quick succession
@@ -366,9 +378,13 @@ pub struct BaseDocument {
     pub(crate) drag_mode: DragMode,
     /// The scrollbar thumb currently under the pointer, if any
     pub(crate) hovered_scrollbar: Option<crate::node::ScrollbarRef>,
-    /// When each scroll container's overlay scrollbars were last shown
-    /// (scrolled, or the pointer left the thumb); drives their fade-out
-    pub(crate) scrollbar_activity: HashMap<NodeId, Instant>,
+    /// The frame time, in seconds, at which each scroll container's overlay
+    /// scrollbars were last shown (scrolled, or the pointer left the thumb);
+    /// drives their fade-out. `None` until the next frame resolves, because
+    /// the frame time may be stale between frames.
+    pub(crate) scrollbar_activity: HashMap<NodeId, Option<f64>>,
+    /// The time of the frame being produced
+    pub(crate) frame_time: FrameTime,
     /// Whether and what kind of scroll animation is currently in progress
     pub(crate) scroll_animation: ScrollAnimationState,
 
@@ -609,6 +625,7 @@ impl BaseDocument {
             drag_mode: DragMode::None,
             hovered_scrollbar: None,
             scrollbar_activity: HashMap::new(),
+            frame_time: FrameTime::default(),
             scroll_animation: ScrollAnimationState::None,
             text_selection: TextSelection::default(),
             scratch: DocumentScratch::default(),
@@ -1965,16 +1982,18 @@ impl BaseDocument {
         {
             return 1.0;
         }
-        self.scrollbar_activity.get(&node_id).map_or(0.0, |last| {
-            crate::node::scrollbar::opacity_at(last.elapsed())
-        })
+        match self.scrollbar_activity.get(&node_id) {
+            None => 0.0,
+            Some(None) => 1.0,
+            Some(&Some(last)) => crate::node::scrollbar::opacity_at(self.frame_time.t - last),
+        }
     }
 
     /// Show `node_id`'s overlay scrollbars at full opacity and restart their
     /// fade-out delay.
     pub(crate) fn show_scrollbars(&mut self, node_id: NodeId) {
         if cfg!(feature = "scrollbars") {
-            self.scrollbar_activity.insert(node_id, Instant::now());
+            self.scrollbar_activity.insert(node_id, None);
         }
     }
 
@@ -1982,9 +2001,10 @@ impl BaseDocument {
     /// fade-out (so frames must keep rendering until they finish).
     fn scrollbars_animating(&self) -> bool {
         use crate::node::scrollbar::{FADE_DELAY, FADE_DURATION};
+        let now = self.frame_time.t;
         self.scrollbar_activity
             .values()
-            .any(|last| last.elapsed() < FADE_DELAY + FADE_DURATION)
+            .any(|last| last.is_none_or(|last| now - last < FADE_DELAY + FADE_DURATION))
     }
 
     /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
@@ -2225,6 +2245,16 @@ impl BaseDocument {
         self.get_node_mut(node_id)
             .and_then(|node| node.element_data_mut())
             .and_then(|el| el.sub_doc_data_mut())
+    }
+
+    /// Sets the time of the frame being produced, which scrolling and scrollbars follow.
+    pub fn set_frame_time(&mut self, time: FrameTime) {
+        self.frame_time = time;
+    }
+
+    /// Returns the time of the frame being produced.
+    pub fn frame_time(&self) -> FrameTime {
+        self.frame_time
     }
 
     pub fn is_animating(&self) -> bool {

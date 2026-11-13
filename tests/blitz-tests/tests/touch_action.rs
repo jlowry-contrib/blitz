@@ -43,6 +43,7 @@ fn finger_event(x: f32, y: f32) -> BlitzPointerEvent {
         mods: Default::default(),
         details: PointerDetails::default(),
         element: Point::default(),
+        time_stamp: 0.0,
         active_pointers: Default::default(),
     }
 }

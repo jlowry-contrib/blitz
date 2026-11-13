@@ -6,7 +6,7 @@ use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_paint::paint_scene;
 use blitz_traits::events::UiEvent;
 use blitz_traits::net::NetProvider;
-use blitz_traits::shell::{ColorScheme, Viewport};
+use blitz_traits::shell::{ColorScheme, FrameTime, Viewport};
 use dioxus_core::{Element, VirtualDom};
 use dioxus_native_dom::DioxusDocument;
 
@@ -55,7 +55,7 @@ impl HarnessOptions {
 /// A headless wrapper around a [`Document`] for driving it programmatically in tests.
 pub struct Harness<D: Document = HtmlDocument> {
     pub doc: D,
-    time: f64,
+    frame_time: FrameTime,
 }
 
 impl Harness<HtmlDocument> {
@@ -90,7 +90,10 @@ impl Harness<DioxusDocument> {
 impl<D: Document> Harness<D> {
     /// Wrap an already-constructed document. Does not [`pump`](Self::pump).
     pub fn wrap(doc: D) -> Self {
-        Self { doc, time: 0.0 }
+        Self {
+            doc,
+            frame_time: FrameTime::default(),
+        }
     }
 
     pub fn into_inner(self) -> D {
@@ -109,18 +112,24 @@ impl<D: Document> Harness<D> {
 
     /// The current time (in seconds) of the harness's animation clock
     pub fn time(&self) -> f64 {
-        self.time
+        self.frame_time.t
     }
 
-    /// Poll pending async work (e.g. the Dioxus VirtualDom) and resolve style/layout
+    /// Begin a frame at the current frame time, poll pending async work (e.g. the Dioxus
+    /// VirtualDom) and resolve style/layout. Doesn't count a frame.
     pub fn pump(&mut self) {
+        self.doc.begin_frame(self.frame_time);
         self.doc.poll(None);
-        self.doc.inner_mut().resolve(self.time);
+        self.doc.inner_mut().resolve(self.frame_time.t);
     }
 
-    /// Advance the animation clock by `dt_seconds` and [`pump`](Self::pump)
+    /// Advance the animation clock by `dt_seconds`, counting one frame, and [`pump`](Self::pump)
     pub fn tick(&mut self, dt_seconds: f64) {
-        self.time += dt_seconds;
+        self.frame_time = FrameTime::new(
+            self.frame_time.t + dt_seconds,
+            dt_seconds,
+            self.frame_time.frame + 1,
+        );
         self.pump();
     }
 

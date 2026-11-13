@@ -12,7 +12,7 @@ use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, MouseEventButton,
     MouseEventButtons, PointerCoords, PointerDetails, UiEvent,
 };
-use blitz_traits::shell::Viewport;
+use blitz_traits::shell::{FrameTime, Viewport};
 use winit::dpi::{LogicalPosition, PhysicalInsets, PhysicalPosition};
 use winit::keyboard::PhysicalKey;
 
@@ -396,6 +396,13 @@ impl<Rend: WindowRenderer> View<Rend> {
         let animation_time = self.current_animation_time();
         let is_visible = self.is_visible;
 
+        let previous = self.doc.inner().frame_time();
+        self.doc.begin_frame(FrameTime::new(
+            animation_time,
+            animation_time - previous.t,
+            previous.frame + 1,
+        ));
+
         let mut inner = self.doc.inner_mut();
         inner.resolve(animation_time);
 
@@ -589,6 +596,8 @@ impl<Rend: WindowRenderer> View<Rend> {
         self.accessibility
             .process_window_event(&*self.window, &event);
 
+        let time_stamp = self.current_animation_time();
+
         match event {
             WindowEvent::Destroyed => {}
             WindowEvent::ActivationTokenDone { .. } => {},
@@ -726,6 +735,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                         mods: winit_modifiers_to_kbt_modifiers(self.keyboard_modifiers.state()),
                         details: PointerDetails::default(),
                         element: Default::default(),
+                        time_stamp,
                         active_pointers: Arc::clone(&self.active_events),
                     };
 
@@ -743,6 +753,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                     mods: winit_modifiers_to_kbt_modifiers(self.keyboard_modifiers.state()),
                     details: PointerDetails::default(),
                     element: Default::default(),
+                    time_stamp,
                     active_pointers: Arc::clone(&self.active_events),
                 };
 
@@ -761,6 +772,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                     mods: winit_modifiers_to_kbt_modifiers(self.keyboard_modifiers.state()),
                     details: pointer_source_to_blitz_details(&source),
                     element: Default::default(),
+                    time_stamp,
                     active_pointers: Arc::clone(&self.active_events),
                 };
                 // Keep multi-touch positions current (no-op for non-active pointers).
@@ -800,6 +812,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                     // TODO: details for pointer up/down events
                     details: PointerDetails::default(),
                     element: Default::default(),
+                    time_stamp,
                     active_pointers: Arc::clone(&self.active_events),
                 };
 
@@ -825,6 +838,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                         mods: winit_modifiers_to_kbt_modifiers(self.keyboard_modifiers.state()),
                         details: PointerDetails::default(),
                         element: Default::default(),
+                        time_stamp,
                         active_pointers: Arc::clone(&self.active_events),
                     };
                     self.doc.handle_ui_event(UiEvent::PointerMove(event));

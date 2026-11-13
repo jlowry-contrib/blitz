@@ -65,12 +65,16 @@ impl BaseDocument {
 
         self.resolve_scroll_animation();
 
-        // Drop scrollbar-activity entries whose fade-out has finished (also
-        // sheds entries for removed nodes).
+        // Start the fade of scrollbars shown since the last frame from this frame,
+        // then drop entries whose fade-out has finished (also sheds entries for
+        // removed nodes).
         {
             use crate::node::scrollbar::{FADE_DELAY, FADE_DURATION};
-            self.scrollbar_activity
-                .retain(|_, last| last.elapsed() < FADE_DELAY + FADE_DURATION);
+            let now = self.frame_time.t;
+            self.scrollbar_activity.retain(|_, last| {
+                let last = *last.get_or_insert(now);
+                now - last < FADE_DELAY + FADE_DURATION
+            });
         }
 
         let root_node_id = self.root_element().id;
@@ -160,6 +164,7 @@ impl BaseDocument {
                 );
                 drop(sub_viewport);
 
+                sub_doc.set_frame_time(self.frame_time);
                 sub_doc.resolve(current_time_for_animations);
 
                 subdoc_is_animating |= sub_doc.is_animating();

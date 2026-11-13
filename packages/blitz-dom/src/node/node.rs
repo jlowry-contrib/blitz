@@ -2060,6 +2060,7 @@ impl Node {
         DomEventData::Click(self.synthetic_click_event_data(mods))
     }
 
+    /// Creates the data of a synthetic click on this node's centre, stamped at time 0.
     pub fn synthetic_click_event_data(&self, mods: Modifiers) -> BlitzPointerEvent {
         let absolute_position = self.absolute_position(0.0, 0.0);
         let x = absolute_position.x + (self.final_layout().size.width / 2.0);
@@ -2083,6 +2084,7 @@ impl Node {
             buttons: Default::default(),
             details: Default::default(),
             element: Default::default(),
+            time_stamp: 0.0,
             active_pointers: Default::default(),
         }
     }

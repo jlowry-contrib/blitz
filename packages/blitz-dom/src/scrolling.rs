@@ -5,7 +5,6 @@ use blitz_traits::events::{BlitzScrollEvent, DomEvent, DomEventData};
 use blitz_traits::node_id::NodeId;
 use style::values::computed::Overflow;
 use stylo_taffy::CopyStyleGetters;
-use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::BaseDocument;
 use crate::util::Point;
@@ -97,8 +96,9 @@ pub(crate) struct ScrollToState {
     pub(crate) start: Point<f64>,
     /// The scroll offset to animate towards.
     pub(crate) end: Point<f64>,
-    /// Time (in milliseconds since the Unix epoch) at which the animation started.
-    pub(crate) start_time: f64,
+    /// Frame time, in milliseconds, of the first frame that showed the animation;
+    /// `None` until that frame resolves.
+    pub(crate) start_time: Option<f64>,
     /// Total duration of the animation in milliseconds.
     pub(crate) duration: f64,
 }
@@ -511,16 +511,13 @@ impl BaseDocument {
     fn start_scroll_animation(&mut self, target: ScrollTarget, end: Point<f64>) {
         let start = self.scroll_state(target, true).0;
 
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64 as f64;
-
+        // The frame time may be stale when no frame has run for a while, so the
+        // animation starts from the next frame that resolves it.
         self.scroll_animation = ScrollAnimationState::ScrollTo(ScrollToState {
             target,
             start,
             end,
-            start_time,
+            start_time: None,
             duration: Self::SMOOTH_SCROLL_DURATION_MS,
         });
 
@@ -721,19 +718,17 @@ impl BaseDocument {
     pub fn resolve_scroll_animation(&mut self) {
         match &mut self.scroll_animation {
             ScrollAnimationState::Fling(fling_state) => {
-                let time_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64 as f64;
+                let time_ms = self.frame_time.t * 1000.0;
 
-                let time_diff_ms = time_ms - fling_state.last_seen_time;
+                // An event stamped after the frame time mustn't run the fling backwards.
+                let time_diff_ms = (time_ms - fling_state.last_seen_time).max(0.0);
 
                 // 0.95 @ 60fps normalized to actual frame times
                 let deceleration = 1.0 - ((0.05 / 16.66666) * time_diff_ms);
 
                 fling_state.x_velocity *= deceleration;
                 fling_state.y_velocity *= deceleration;
-                fling_state.last_seen_time = time_ms;
+                fling_state.last_seen_time += time_diff_ms;
                 let fling_state = fling_state.clone();
 
                 let dx = fling_state.x_velocity * time_diff_ms;
@@ -745,17 +740,15 @@ impl BaseDocument {
                 }
             }
             ScrollAnimationState::ScrollTo(scroll_to) => {
+                let time_ms = self.frame_time.t * 1000.0;
+                let start_time = *scroll_to.start_time.get_or_insert(time_ms);
                 let scroll_to = scroll_to.clone();
-                let time_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64 as f64;
 
                 // Normalised progress through the animation, clamped to [0, 1].
                 let progress = if scroll_to.duration <= 0.0 {
                     1.0
                 } else {
-                    ((time_ms - scroll_to.start_time) / scroll_to.duration).clamp(0.0, 1.0)
+                    ((time_ms - start_time) / scroll_to.duration).clamp(0.0, 1.0)
                 };
                 let eased = ease_in_out_cubic(progress);
 

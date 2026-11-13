@@ -17,6 +17,7 @@ fn event(id: BlitzPointerId, x: f32, y: f32) -> BlitzPointerEvent {
         MouseEventButton::Main,
         MouseEventButtons::from(MouseEventButton::Main),
         Modifiers::default(),
+        0.0,
     )
 }
 

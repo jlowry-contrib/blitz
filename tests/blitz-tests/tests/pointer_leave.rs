@@ -22,6 +22,7 @@ fn mouse_event(x: f32, y: f32) -> blitz_traits::events::BlitzPointerEvent {
         MouseEventButton::Main,
         MouseEventButtons::empty(),
         Modifiers::default(),
+        0.0,
     )
 }
 
@@ -171,6 +172,7 @@ fn finger_event(x: f32, y: f32) -> blitz_traits::events::BlitzPointerEvent {
         MouseEventButton::Main,
         MouseEventButtons::from(MouseEventButton::Main),
         Modifiers::default(),
+        0.0,
     )
 }
 

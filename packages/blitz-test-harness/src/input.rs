@@ -26,7 +26,7 @@ fn coords(x: f32, y: f32) -> PointerCoords {
     }
 }
 
-/// Construct a [`BlitzPointerEvent`] at page coordinates `(x, y)`
+/// Construct a [`BlitzPointerEvent`] at page coordinates `(x, y)`, stamped `time_stamp` seconds
 pub fn pointer_event(
     id: BlitzPointerId,
     x: f32,
@@ -34,6 +34,7 @@ pub fn pointer_event(
     button: MouseEventButton,
     buttons: MouseEventButtons,
     mods: Modifiers,
+    time_stamp: f64,
 ) -> BlitzPointerEvent {
     BlitzPointerEvent {
         id,
@@ -44,12 +45,14 @@ pub fn pointer_event(
         mods,
         details: PointerDetails::default(),
         element: Point::default(),
+        time_stamp,
         active_pointers: Default::default(),
     }
 }
 
-/// Construct a main-button mouse [`BlitzPointerEvent`] at page coordinates `(x, y)`
-pub fn mouse_pointer_event(x: f32, y: f32) -> BlitzPointerEvent {
+/// Construct a main-button mouse [`BlitzPointerEvent`] at page coordinates `(x, y)`, stamped
+/// `time_stamp` seconds
+pub fn mouse_pointer_event(x: f32, y: f32, time_stamp: f64) -> BlitzPointerEvent {
     pointer_event(
         BlitzPointerId::Mouse,
         x,
@@ -57,11 +60,13 @@ pub fn mouse_pointer_event(x: f32, y: f32) -> BlitzPointerEvent {
         MouseEventButton::Main,
         MouseEventButtons::from(MouseEventButton::Main),
         Modifiers::default(),
+        time_stamp,
     )
 }
 
-/// Construct a finger [`BlitzPointerEvent`] at page coordinates `(x, y)`
-pub fn touch_pointer_event(finger: u64, x: f32, y: f32) -> BlitzPointerEvent {
+/// Construct a finger [`BlitzPointerEvent`] at page coordinates `(x, y)`, stamped `time_stamp`
+/// seconds
+pub fn touch_pointer_event(finger: u64, x: f32, y: f32, time_stamp: f64) -> BlitzPointerEvent {
     pointer_event(
         BlitzPointerId::Finger(finger),
         x,
@@ -69,6 +74,7 @@ pub fn touch_pointer_event(finger: u64, x: f32, y: f32) -> BlitzPointerEvent {
         MouseEventButton::Main,
         MouseEventButtons::from(MouseEventButton::Main),
         Modifiers::default(),
+        time_stamp,
     )
 }
 
@@ -101,7 +107,7 @@ impl<D: Document> Harness<D> {
 
     /// Click (pointer down + up) at page coordinates `(x, y)`
     pub fn click_at(&mut self, x: f32, y: f32) {
-        let event = mouse_pointer_event(x, y);
+        let event = mouse_pointer_event(x, y, self.time());
         self.dispatch(UiEvent::PointerDown(event.clone()));
         self.dispatch(UiEvent::PointerUp(event));
         self.pump();
@@ -109,13 +115,13 @@ impl<D: Document> Harness<D> {
 
     /// Press the main mouse button at page coordinates `(x, y)`
     pub fn mouse_down_at(&mut self, x: f32, y: f32) {
-        self.dispatch(UiEvent::PointerDown(mouse_pointer_event(x, y)));
+        self.dispatch(UiEvent::PointerDown(mouse_pointer_event(x, y, self.time())));
         self.pump();
     }
 
     /// Release the main mouse button at page coordinates `(x, y)`
     pub fn mouse_up_at(&mut self, x: f32, y: f32) {
-        self.dispatch(UiEvent::PointerUp(mouse_pointer_event(x, y)));
+        self.dispatch(UiEvent::PointerUp(mouse_pointer_event(x, y, self.time())));
         self.pump();
     }
 
@@ -128,6 +134,7 @@ impl<D: Document> Harness<D> {
             MouseEventButton::Main,
             MouseEventButtons::empty(),
             Modifiers::default(),
+            self.time(),
         );
         self.dispatch(UiEvent::PointerMove(event));
         self.pump();
@@ -137,14 +144,22 @@ impl<D: Document> Harness<D> {
     /// pressed, moving in `steps` increments
     pub fn drag(&mut self, from: (f32, f32), to: (f32, f32), steps: u32) {
         let steps = steps.max(1);
-        self.dispatch(UiEvent::PointerDown(mouse_pointer_event(from.0, from.1)));
+        self.dispatch(UiEvent::PointerDown(mouse_pointer_event(
+            from.0,
+            from.1,
+            self.time(),
+        )));
         for i in 1..=steps {
             let t = i as f32 / steps as f32;
             let x = from.0 + (to.0 - from.0) * t;
             let y = from.1 + (to.1 - from.1) * t;
-            self.dispatch(UiEvent::PointerMove(mouse_pointer_event(x, y)));
+            self.dispatch(UiEvent::PointerMove(mouse_pointer_event(x, y, self.time())));
         }
-        self.dispatch(UiEvent::PointerUp(mouse_pointer_event(to.0, to.1)));
+        self.dispatch(UiEvent::PointerUp(mouse_pointer_event(
+            to.0,
+            to.1,
+            self.time(),
+        )));
         self.pump();
     }
 
@@ -156,7 +171,7 @@ impl<D: Document> Harness<D> {
 
     /// Tap (touch down + up) at page coordinates `(x, y)`
     pub fn tap_at(&mut self, x: f32, y: f32) {
-        let event = touch_pointer_event(0, x, y);
+        let event = touch_pointer_event(0, x, y, self.time());
         self.dispatch(UiEvent::PointerDown(event.clone()));
         self.dispatch(UiEvent::PointerUp(event));
         self.pump();
@@ -164,19 +179,34 @@ impl<D: Document> Harness<D> {
 
     /// Press `finger` down at page coordinates `(x, y)`
     pub fn touch_down(&mut self, finger: u64, x: f32, y: f32) {
-        self.dispatch(UiEvent::PointerDown(touch_pointer_event(finger, x, y)));
+        self.dispatch(UiEvent::PointerDown(touch_pointer_event(
+            finger,
+            x,
+            y,
+            self.time(),
+        )));
         self.pump();
     }
 
     /// Move `finger` to page coordinates `(x, y)`
     pub fn touch_move(&mut self, finger: u64, x: f32, y: f32) {
-        self.dispatch(UiEvent::PointerMove(touch_pointer_event(finger, x, y)));
+        self.dispatch(UiEvent::PointerMove(touch_pointer_event(
+            finger,
+            x,
+            y,
+            self.time(),
+        )));
         self.pump();
     }
 
     /// Lift `finger` at page coordinates `(x, y)`
     pub fn touch_up(&mut self, finger: u64, x: f32, y: f32) {
-        self.dispatch(UiEvent::PointerUp(touch_pointer_event(finger, x, y)));
+        self.dispatch(UiEvent::PointerUp(touch_pointer_event(
+            finger,
+            x,
+            y,
+            self.time(),
+        )));
         self.pump();
     }
 

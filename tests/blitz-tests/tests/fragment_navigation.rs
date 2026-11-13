@@ -8,10 +8,9 @@ use blitz_traits::{
         BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, MouseEventButton,
         MouseEventButtons, Point, PointerCoords, PointerDetails, UiEvent,
     },
-    shell::{ColorScheme, Viewport},
+    shell::{ColorScheme, FrameTime, Viewport},
 };
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 fn layout_doc(html: &str) -> HtmlDocument {
     let mut doc = HtmlDocument::from_html(
@@ -28,15 +27,21 @@ fn layout_doc(html: &str) -> HtmlDocument {
     doc
 }
 
-/// Drive `resolve` repeatedly (advancing the wall-clock-based scroll animation)
-/// until the document reports it is no longer animating, or a timeout elapses.
+/// Advance the frame clock by one 60 Hz frame and resolve.
+fn next_frame(doc: &mut HtmlDocument) {
+    let dt = 1.0 / 60.0;
+    let now = doc.frame_time();
+    doc.set_frame_time(FrameTime::new(now.t + dt, dt, now.frame + 1));
+    doc.resolve(now.t + dt);
+}
+
+/// Drive frames until the document reports it is no longer animating, or five
+/// seconds of frame time pass.
 fn drive_until_settled(doc: &mut HtmlDocument) {
-    let start = Instant::now();
     while doc.is_animating() {
-        std::thread::sleep(Duration::from_millis(8));
-        doc.resolve(0.0);
+        next_frame(doc);
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            doc.frame_time().t < 5.0,
             "scroll animation did not settle within 5s"
         );
     }
@@ -59,6 +64,7 @@ fn pointer_event(x: f32, y: f32) -> BlitzPointerEvent {
         mods: Default::default(),
         details: PointerDetails::default(),
         element: Point::default(),
+        time_stamp: 0.0,
         active_pointers: Default::default(),
     }
 }
@@ -366,8 +372,9 @@ fn wheel_scroll_cancels_smooth_scroll() {
     wheel_at(&mut doc, 5.0, 5.0, 0.0, -20.0);
     assert_eq!(doc.get_node(scroller).unwrap().scroll_offset().y, 20.0);
 
-    std::thread::sleep(Duration::from_millis(50));
-    doc.resolve(0.0);
+    for _ in 0..3 {
+        next_frame(&mut doc);
+    }
     assert_eq!(doc.get_node(scroller).unwrap().scroll_offset().y, 20.0);
 }
 

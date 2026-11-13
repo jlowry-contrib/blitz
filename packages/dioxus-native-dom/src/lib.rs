@@ -16,7 +16,9 @@ mod mutation_writer;
 mod write_once_attr;
 pub use blitz_dom::DocumentConfig;
 pub use dioxus_document::DioxusDocument;
-pub use events::{NodeHandle, synthetic_click_event, synthetic_form_event};
+pub use events::{
+    NativePointerData, NativeTouchData, NodeHandle, synthetic_click_event, synthetic_form_event,
+};
 pub use write_once_attr::{CustomWidgetAttr, SubDocumentAttr};
 
 pub use blitz_dom::NodeId;

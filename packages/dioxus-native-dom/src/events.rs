@@ -379,6 +379,13 @@ impl HasKeyboardData for BlitzKeyboardData {
 #[derive(Clone)]
 pub struct NativePointerData(pub(crate) BlitzPointerEvent);
 
+impl NativePointerData {
+    /// Returns when the event happened, in seconds on the frame clock.
+    pub fn time_stamp(&self) -> f64 {
+        self.0.time_stamp
+    }
+}
+
 impl InteractionLocation for NativePointerData {
     fn client_coordinates(&self) -> ClientPoint {
         ClientPoint::new(self.0.client_x() as f64, self.0.client_y() as f64)
@@ -484,6 +491,13 @@ impl HasPointerData for NativePointerData {
 /// [`BlitzPointerEvent::active_pointers`] list and reported via `touches`.
 #[derive(Clone)]
 pub struct NativeTouchData(pub(crate) BlitzPointerEvent);
+
+impl NativeTouchData {
+    /// Returns when the triggering touch happened, in seconds on the frame clock.
+    pub fn time_stamp(&self) -> f64 {
+        self.0.time_stamp
+    }
+}
 
 impl ModifiersInteraction for NativeTouchData {
     fn modifiers(&self) -> Modifiers {
@@ -703,6 +717,7 @@ mod tests {
             mods: Default::default(),
             details: PointerDetails::default(),
             element: Point::default(),
+            time_stamp: 0.0,
             active_pointers: Default::default(),
         }
     }

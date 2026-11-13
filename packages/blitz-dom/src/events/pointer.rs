@@ -2,8 +2,6 @@ use blitz_traits::node_id::NodeId;
 use std::collections::VecDeque;
 use stylo_taffy::CopyStyleGetters;
 
-use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
 use blitz_traits::{
     events::{
         BlitzInputEvent, BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent,
@@ -11,7 +9,6 @@ use blitz_traits::{
     },
     navigation::NavigationOptions,
 };
-use keyboard_types::Modifiers;
 use markup5ever::local_name;
 use style::values::computed::{Overflow, TouchAction, UserSelect};
 use style_dom::ElementState;
@@ -39,7 +36,8 @@ pub(crate) struct PanState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PanSample {
-    pub(crate) time: u64,
+    /// The event's time stamp, in milliseconds.
+    pub(crate) time: f64,
     pub(crate) dx: f32,
     pub(crate) dy: f32,
 }
@@ -71,7 +69,7 @@ impl DragMode {
 }
 
 impl PanState {
-    fn update(&mut self, time_ms: u64, screen_x: f32, screen_y: f32) -> (f64, f64) {
+    fn update(&mut self, time_ms: f64, screen_x: f32, screen_y: f32) -> (f64, f64) {
         // Constrain panning to the axes permitted by the `touch-action` property. Positions are
         // still tracked on both axes so that deltas remain correct after a disallowed movement.
         let dx = if self.allow_x {
@@ -95,10 +93,10 @@ impl PanState {
         });
 
         // Remove samples older than 100ms
-        if self.samples.len() > 50 && time_ms - self.samples.front().unwrap().time > 100 {
+        if self.samples.len() > 50 && time_ms - self.samples.front().unwrap().time > 100.0 {
             let idx = self
                 .samples
-                .partition_point(|sample| time_ms - sample.time > 100);
+                .partition_point(|sample| time_ms - sample.time > 100.0);
             // FIXME: use truncate_front once stable
             for _ in 0..idx {
                 self.samples.pop_front();
@@ -108,14 +106,14 @@ impl PanState {
         (dx, dy)
     }
 
-    fn generate_fling(&self, time_ms: u64) -> Option<FlingState> {
+    fn generate_fling(&self, time_ms: f64) -> Option<FlingState> {
         // Generate "fling"
         if let Some(last_sample) = self.samples.back()
-            && time_ms - last_sample.time < 100
+            && time_ms - last_sample.time < 100.0
         {
             let idx = self
                 .samples
-                .partition_point(|sample| time_ms - sample.time > 100);
+                .partition_point(|sample| time_ms - sample.time > 100.0);
 
             // Compute pan_time. Will always be <= 100ms as we ignore samples older than that.
             let pan_start_time = self.samples[idx].time;
@@ -145,7 +143,7 @@ impl PanState {
 
                 return Some(FlingState {
                     target: self.target,
-                    last_seen_time: time_ms as f64,
+                    last_seen_time: time_ms,
                     x_velocity: x_velocity as f64 * 2.0,
                     y_velocity: y_velocity as f64 * 2.0,
                 });
@@ -265,10 +263,7 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
     }
 
     if let DragMode::Panning(state) = &mut doc.drag_mode {
-        let time_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let time_ms = event.time_stamp * 1000.0;
 
         let target = state.target;
         let (dx, dy) = state.update(time_ms, event.screen_x(), event.screen_y());
@@ -384,19 +379,18 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
 pub(crate) fn handle_pointerdown(
     doc: &mut BaseDocument,
     _target: NodeId,
-    x: f32,
-    y: f32,
-    button: MouseEventButton,
-    mods: Modifiers,
+    event: &BlitzPointerEvent,
     dispatch_event: &mut dyn FnMut(DomEvent),
 ) {
+    let (x, y) = (event.page_x(), event.page_y());
+    let (button, mods, time_stamp) = (event.button, event.mods, event.time_stamp);
     // Compute click count using the previous mousedown position (before updating)
     // This handles both double-click detection and text input word/line selection
     // TODO: For text inputs, only increment click count if click maps to the same/similar caret position
     doc.click_count = if doc
         .last_mousedown_time
-        .map(|t| t.elapsed() < Duration::from_millis(500))
-        .unwrap_or(false)
+        // 500 ms: the double-click interval Windows uses by default.
+        .is_some_and(|last| time_stamp - last < 0.5)
         && (doc.mousedown_position.x - x).abs() <= 2.0
         && (doc.mousedown_position.y - y).abs() <= 2.0
     {
@@ -406,7 +400,7 @@ pub(crate) fn handle_pointerdown(
     };
 
     // Update mousedown tracking for next click and selection drag detection
-    doc.last_mousedown_time = Some(Instant::now());
+    doc.last_mousedown_time = Some(time_stamp);
     doc.mousedown_position = taffy::Point { x, y };
     doc.drag_mode = DragMode::None;
     doc.scroll_animation = ScrollAnimationState::None;
@@ -586,10 +580,7 @@ pub(crate) fn handle_pointerup<F: FnMut(DomEvent)>(
         doc.shell_provider.request_redraw();
     }
 
-    let time_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let time_ms = event.time_stamp * 1000.0;
 
     if let DragMode::Panning(state) = &drag_mode {
         if let Some(fling) = state.generate_fling(time_ms) {
@@ -728,7 +719,8 @@ pub(crate) fn handle_click(
                     {
                         // Apply default click event action for target node
                         let target_node = doc.get_node_mut(target_node_id).unwrap();
-                        let syn_event = target_node.synthetic_click_event_data(event.mods);
+                        let mut syn_event = target_node.synthetic_click_event_data(event.mods);
+                        syn_event.time_stamp = event.time_stamp;
                         handle_click(doc, target_node_id, &syn_event, dispatch_event);
                         break 'matched true;
                     }
