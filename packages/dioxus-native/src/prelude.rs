@@ -25,6 +25,15 @@ pub use dioxus_hooks::*;
 pub use dioxus_signals::{self, *};
 pub use dioxus_stores::{self, GlobalStore, ReadStore, Store, WriteStore, store, use_store};
 
+// Frames, glass and portals
+#[cfg(feature = "vello")]
+pub use crate::GlassInputs;
+pub use crate::{
+    FrameClock, FrameTime, Portal, Presented, RenderTargetId, SafeArea, ScrollPhysics, TimeSource,
+    pointer_time_stamp, request_animation_frame, touch_time_stamp, use_frame_clock, use_frame_time,
+    use_portal_outlet, use_portal_target,
+};
+
 // Document and History
 pub use dioxus_document::{self as document, Meta, Stylesheet, Title};
 pub use dioxus_history::{History, history};

@@ -4,8 +4,11 @@ use dioxus_core::LaunchConfig;
 use peniko::Color;
 use winit::window::WindowAttributes;
 
+#[cfg(feature = "vello")]
+use crate::GlassInputs;
 use crate::KeyboardShortcut;
 use crate::assets::AssetHandler;
+use crate::{SafeArea, ScrollPhysics, TimeSource};
 
 /// Launch-time configuration for a dioxus-native application.
 pub struct Config {
@@ -16,6 +19,17 @@ pub struct Config {
     #[cfg_attr(not(feature = "devtools"), allow(dead_code))]
     pub(crate) devtools_shortcuts: Vec<KeyboardShortcut>,
     pub(crate) asset_handler: Option<AssetHandler>,
+    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
+    pub(crate) time_source: TimeSource,
+    #[cfg(feature = "vello")]
+    pub(crate) glass_backend: Option<Box<dyn anyrender_vello::glass::GlassBackend + Send>>,
+    #[cfg(feature = "vello")]
+    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
+    pub(crate) glass_inputs: Option<GlassInputs>,
+    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
+    pub(crate) safe_area: SafeArea,
+    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
+    pub(crate) scroll_physics: ScrollPhysics,
 }
 
 impl LaunchConfig for Config {}
@@ -50,6 +64,13 @@ impl Default for Config {
                 Vec::new()
             },
             asset_handler: None,
+            time_source: TimeSource::default(),
+            #[cfg(feature = "vello")]
+            glass_backend: None,
+            #[cfg(feature = "vello")]
+            glass_inputs: None,
+            safe_area: SafeArea::default(),
+            scroll_physics: ScrollPhysics::default(),
         }
     }
 }
@@ -134,6 +155,41 @@ impl Config {
         self.devtools_shortcuts = shortcuts.into_iter().collect();
         self
     }
+
+    /// Set the clock that drives frames; [`TimeSource::Manual`] currently runs on the wall clock.
+    pub fn with_time_source(mut self, time_source: TimeSource) -> Self {
+        self.time_source = time_source;
+        self
+    }
+
+    /// Install a glass backend into the Vello renderer.
+    #[cfg(feature = "vello")]
+    pub fn with_glass_backend(
+        mut self,
+        backend: Box<dyn anyrender_vello::glass::GlassBackend + Send>,
+    ) -> Self {
+        self.glass_backend = Some(backend);
+        self
+    }
+
+    /// Set the inputs the glass backend reads; currently stored but not yet read.
+    #[cfg(feature = "vello")]
+    pub fn with_glass_inputs(mut self, inputs: GlassInputs) -> Self {
+        self.glass_inputs = Some(inputs);
+        self
+    }
+
+    /// Set whether the document avoids the safe area; currently stored but not yet applied.
+    pub fn with_safe_area(mut self, safe_area: SafeArea) -> Self {
+        self.safe_area = safe_area;
+        self
+    }
+
+    /// Set the physics of touch-driven scrolling; currently stored but not yet applied.
+    pub fn with_scroll_physics(mut self, scroll_physics: ScrollPhysics) -> Self {
+        self.scroll_physics = scroll_physics;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +221,16 @@ mod tests {
                 .devtools_shortcuts
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn config_builders_store_their_values() {
+        let config = Config::new()
+            .with_time_source(TimeSource::Manual)
+            .with_safe_area(SafeArea::Ignore)
+            .with_scroll_physics(ScrollPhysics::Ios);
+        assert_eq!(config.time_source, TimeSource::Manual);
+        assert_eq!(config.safe_area, SafeArea::Ignore);
+        assert_eq!(config.scroll_physics, ScrollPhysics::Ios);
     }
 }

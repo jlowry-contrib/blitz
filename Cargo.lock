@@ -1074,8 +1074,10 @@ dependencies = [
 name = "blitz-test-harness"
 version = "0.3.0-beta.4"
 dependencies = [
+ "anyrender",
  "blitz-dom",
  "blitz-html",
+ "blitz-paint",
  "blitz-traits",
  "dioxus-core",
  "dioxus-native-dom",

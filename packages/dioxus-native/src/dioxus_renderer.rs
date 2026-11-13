@@ -49,6 +49,9 @@ pub struct RendererOptions {
     /// wgpu limits to request from the GPU adapter.
     #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
     pub limits: Option<Limits>,
+    /// Glass backend installed into the Vello renderer.
+    #[cfg(feature = "vello")]
+    pub glass_backend: Option<Box<dyn anyrender_vello::glass::GlassBackend + Send>>,
 }
 
 #[derive(Clone)]
@@ -102,7 +105,12 @@ impl DioxusNativeWindowRenderer {
                 if let Some(limits) = options.limits {
                     inner_options = inner_options.limits(limits);
                 }
-                let inner_renderer = InnerRenderer::with_options(inner_options);
+                #[allow(unused_mut)]
+                let mut inner_renderer = InnerRenderer::with_options(inner_options);
+                #[cfg(feature = "vello")]
+                if let Some(backend) = options.glass_backend {
+                    inner_renderer.set_glass_backend(backend);
+                }
             } else {
                 let inner_renderer = InnerRenderer::with_options(config);
             }

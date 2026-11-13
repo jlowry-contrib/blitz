@@ -11,7 +11,7 @@ keywords = ["dom", "ui", "gui", "react"]
 
 [features]
 default = ["accessibility", "hot-reload", "net", "html", "svg", "system-fonts", "file-dialog", "vello-hybrid", "woff", "text-transform-icu", "apple-font-embolden"]
-prelude = ["dep:dioxus-core-macro", "dep:dioxus-hooks", "dep:dioxus-signals", "dep:dioxus-stores", "dep:manganis"]
+prelude = ["dep:dioxus-core-macro", "dep:dioxus-hooks", "dep:dioxus-stores", "dep:manganis"]
 
 # DOM features
 svg = ["blitz-dom/svg", "blitz-paint/svg"]
@@ -95,13 +95,13 @@ dioxus-asset-resolver = { workspace = true, features = ["native"] }
 dioxus-history = { workspace = true }
 dioxus-document = { workspace = true }
 dioxus-cli-config = { workspace = true }
+dioxus-signals = { workspace = true }
 
 # Dioxus hot reload
 dioxus-devtools = { workspace = true, optional = true }
 
 # Dioxus prelude
 dioxus-hooks = { workspace = true, optional = true }
-dioxus-signals = { workspace = true, optional = true }
 dioxus-stores = { workspace = true, optional = true }
 dioxus-core-macro = { workspace = true, optional = true }
 manganis = { workspace = true, features = ["dioxus"], optional = true }

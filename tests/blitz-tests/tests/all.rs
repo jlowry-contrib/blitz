@@ -29,6 +29,7 @@ mod focus_within;
 mod focusability_updates;
 mod font_element_attributes;
 mod fragment_navigation;
+mod harness_render;
 mod harness_smoke;
 mod hidden_checkbox_input;
 mod hit_inline_embedded_box;

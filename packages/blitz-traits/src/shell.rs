@@ -157,6 +157,64 @@ impl Viewport {
     }
 }
 
+/// The time of the frame being drawn, in seconds on the frame clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct FrameTime {
+    /// Seconds since the clock started.
+    pub t: f64,
+    /// Seconds since the previous frame.
+    pub dt: f64,
+    /// The number of frames drawn before this one.
+    pub frame: u64,
+}
+
+impl FrameTime {
+    /// Creates a frame time from its clock time, step and frame number.
+    pub fn new(t: f64, dt: f64, frame: u64) -> Self {
+        Self { t, dt, frame }
+    }
+}
+
+/// The acknowledgement of a frame the shell has presented, or failed to paint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Presented {
+    /// The number of the frame.
+    pub frame: u64,
+    /// The frame's clock time, in seconds.
+    pub t: f64,
+    /// Whether the frame was painted and presented.
+    pub painted: bool,
+}
+
+impl Presented {
+    /// Creates an acknowledgement for `frame` at clock time `t`.
+    pub fn new(frame: u64, t: f64, painted: bool) -> Self {
+        Self { frame, t, painted }
+    }
+}
+
+/// Whether the document is laid out inside or under the window's safe area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SafeArea {
+    /// Lay the document out inside the safe area.
+    #[default]
+    Avoid,
+    /// Lay the document out under the whole window.
+    Ignore,
+}
+
+/// The physics that touch-driven scrolling follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollPhysics {
+    /// Blitz's own scrolling.
+    #[default]
+    Default,
+    /// iOS-style scrolling.
+    Ios,
+}
+
 /// Filter provided by the dom for an file picker
 pub struct FileDialogFilter {
     pub name: String,

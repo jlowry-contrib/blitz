@@ -15,8 +15,12 @@ mod contexts;
 mod dioxus_application;
 mod dioxus_renderer;
 mod event_handlers;
+mod frame;
+#[cfg(feature = "vello")]
+mod glass;
 mod hooks;
 mod link_handler;
+mod portal;
 mod shortcut;
 
 #[cfg(feature = "prelude")]
@@ -64,9 +68,17 @@ pub use {
 
 use blitz_dom::StyleThreading;
 pub use blitz_dom::{FontContext, Widget, build_single_font_ctx};
+pub use blitz_traits::shell::{FrameTime, Presented, SafeArea, ScrollPhysics};
 pub use config::Config;
 pub use event_handlers::WinitEventHandlerId;
+pub use frame::{
+    FrameClock, TimeSource, pointer_time_stamp, request_animation_frame, touch_time_stamp,
+    use_frame_clock, use_frame_time,
+};
+#[cfg(feature = "vello")]
+pub use glass::GlassInputs;
 pub use hooks::{use_back_button, use_window_event};
+pub use portal::{Portal, RenderTargetId, use_portal_outlet, use_portal_target};
 pub use shortcut::KeyboardShortcut;
 pub use winit;
 pub use winit::dpi::{LogicalSize, PhysicalSize};
@@ -240,6 +252,8 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
         alpha_mode: config.alpha_mode,
         features,
         limits,
+        #[cfg(feature = "vello")]
+        glass_backend: config.glass_backend.take(),
     });
     #[cfg(not(any(feature = "vello", feature = "vello-hybrid")))]
     let renderer = DioxusNativeWindowRenderer::with_options(RendererOptions {

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use anyrender::ImageRenderer;
 use blitz_dom::{DocGuard, DocGuardMut, Document, DocumentConfig};
 use blitz_html::{HtmlDocument, HtmlProvider};
+use blitz_paint::paint_scene;
 use blitz_traits::events::UiEvent;
 use blitz_traits::net::NetProvider;
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -167,6 +169,23 @@ impl<D: Document> Harness<D> {
         }
         drop(doc);
         recorded.borrow().clone()
+    }
+
+    /// Paint the document with `renderer` at the viewport's size and scale, returning RGBA8 pixels.
+    ///
+    /// Does not [`pump`](Self::pump) first.
+    pub fn render<R: ImageRenderer>(&mut self, renderer: &mut R) -> Vec<u8> {
+        let mut doc = self.doc.inner_mut();
+        let viewport = doc.get_viewport();
+        let (width, height) = viewport.window_size;
+        let scale = viewport.scale_f64();
+        renderer.resize(width, height);
+        let mut pixels = Vec::new();
+        renderer.render_to_vec(
+            |scene| paint_scene(scene, &mut doc, scale, width, height, 0, 0),
+            &mut pixels,
+        );
+        pixels
     }
 
     /// Resize the viewport, keeping the current scale and color scheme
