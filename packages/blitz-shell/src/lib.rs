@@ -23,7 +23,7 @@ mod devtools;
 pub use crate::application::BlitzApplication;
 pub use crate::event::{BlitzShellEvent, BlitzShellProxy};
 pub use crate::frame::{FrameClock, FrameHook, FrameOutcome, FrameScheduler, StepAck, TimeSource};
-pub use crate::window::{View, WindowConfig, pointer_coords};
+pub use crate::window::{View, WindowConfig, pointer_coords, viewport_geometry};
 
 #[cfg(feature = "data-uri")]
 pub use crate::net::DataUriNetProvider;

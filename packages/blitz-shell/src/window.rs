@@ -7,14 +7,14 @@ use crate::convert_events::{
 use crate::event::{BlitzShellEvent, BlitzShellProxy, create_waker};
 use crate::frame::{FrameClock, FrameHook, FrameScheduler, StepAck, TimeSource};
 use anyrender::WindowRenderer;
-use blitz_dom::{BaseDocument, Document};
+use blitz_dom::{BaseDocument, CSSPixel, Document, SideOffsets2D};
 use blitz_paint::paint_scene;
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, MouseEventButton,
     MouseEventButtons, PointerCoords, PointerDetails, UiEvent,
 };
-use blitz_traits::shell::{FrameTime, Viewport};
-use winit::dpi::{LogicalPosition, PhysicalInsets, PhysicalPosition};
+use blitz_traits::shell::{FrameTime, SafeArea, Viewport};
+use winit::dpi::{LogicalPosition, PhysicalInsets, PhysicalPosition, PhysicalSize};
 use winit::keyboard::PhysicalKey;
 
 use atomic_refcell::AtomicRefCell;
@@ -38,6 +38,38 @@ fn get_safe_area_insets(_window: &dyn Window) -> PhysicalInsets<u32> {
 #[cfg(not(target_os = "macos"))]
 fn get_safe_area_insets(window: &dyn Window) -> PhysicalInsets<u32> {
     window.safe_area()
+}
+
+/// Returns the viewport size and its offset in the surface for a safe-area mode.
+///
+/// Under [`SafeArea::Avoid`] the viewport is the surface less the insets, offset by the top
+/// and left insets. Under [`SafeArea::Ignore`] it is the whole surface, at the origin.
+pub fn viewport_geometry(
+    surface: PhysicalSize<u32>,
+    insets: PhysicalInsets<u32>,
+    mode: SafeArea,
+) -> (PhysicalSize<u32>, (u32, u32)) {
+    match mode {
+        SafeArea::Ignore => (surface, (0, 0)),
+        SafeArea::Avoid => (
+            PhysicalSize::new(
+                surface.width.saturating_sub(insets.left + insets.right),
+                surface.height.saturating_sub(insets.top + insets.bottom),
+            ),
+            (insets.left, insets.top),
+        ),
+    }
+}
+
+/// Converts physical insets into CSS-px offsets at `scale`.
+fn css_insets(insets: PhysicalInsets<u32>, scale: f64) -> SideOffsets2D<f32, CSSPixel> {
+    let css = |px: u32| (px as f64 / scale) as f32;
+    SideOffsets2D::new(
+        css(insets.top),
+        css(insets.right),
+        css(insets.bottom),
+        css(insets.left),
+    )
 }
 
 /// Converts a physical pointer position into CSS-px coordinates, net of the safe-area insets.
@@ -81,6 +113,7 @@ pub struct WindowConfig<Rend: WindowRenderer> {
     renderer: Rend,
     time_source: TimeSource,
     frame_hook: Option<FrameHook<Rend>>,
+    safe_area: SafeArea,
 }
 
 impl<Rend: WindowRenderer> WindowConfig<Rend> {
@@ -99,7 +132,14 @@ impl<Rend: WindowRenderer> WindowConfig<Rend> {
             renderer,
             time_source: TimeSource::default(),
             frame_hook: None,
+            safe_area: SafeArea::default(),
         }
+    }
+
+    /// Sets whether the document is laid out inside the safe area or under the whole window.
+    pub fn with_safe_area(mut self, safe_area: SafeArea) -> Self {
+        self.safe_area = safe_area;
+        self
     }
 
     /// Sets the clock that drives the window's frames.
@@ -150,6 +190,10 @@ pub struct View<Rend: WindowRenderer> {
     scheduler: FrameScheduler<dyn Document, Rend>,
     pub is_visible: bool,
     pub safe_area_insets: PhysicalInsets<u32>,
+    /// Whether the document avoids the safe area or renders under it.
+    safe_area: SafeArea,
+    /// The size of the window surface the renderer draws into.
+    surface_size: PhysicalSize<u32>,
 
     #[cfg(target_arch = "wasm32")]
     pending_resize: Option<winit::dpi::PhysicalSize<u32>>,
@@ -233,14 +277,13 @@ impl<Rend: WindowRenderer> View<Rend> {
         let safe_area_insets = get_safe_area_insets(&*winit_window);
         let theme = winit_window.theme().unwrap_or(Theme::Light);
         let color_scheme = theme_to_color_scheme(theme);
-        // The viewport is the window surface minus the safe area insets
-        let viewport_width = size
-            .width
-            .saturating_sub(safe_area_insets.left + safe_area_insets.right);
-        let viewport_height = size
-            .height
-            .saturating_sub(safe_area_insets.top + safe_area_insets.bottom);
-        let viewport = Viewport::new(viewport_width, viewport_height, scale, color_scheme);
+        let (viewport_size, _) = viewport_geometry(size, safe_area_insets, config.safe_area);
+        let viewport = Viewport::new(
+            viewport_size.width,
+            viewport_size.height,
+            scale,
+            color_scheme,
+        );
 
         // Create shell provider
         let shell_provider =
@@ -249,6 +292,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         let mut doc = config.doc;
         let mut inner = doc.inner_mut();
         inner.set_viewport(viewport);
+        inner.set_safe_area_insets(css_insets(safe_area_insets, scale as f64));
         inner.set_shell_provider(Arc::new(shell_provider));
 
         // If the document title is set prior to the window being created then it will
@@ -276,6 +320,8 @@ impl<Rend: WindowRenderer> View<Rend> {
             buttons: MouseEventButtons::None,
             active_events: Arc::new(AtomicRefCell::new(Vec::new())),
             safe_area_insets,
+            safe_area: config.safe_area,
+            surface_size: size,
             #[cfg(target_arch = "wasm32")]
             pending_resize: None,
             #[cfg(target_arch = "wasm32")]
@@ -296,6 +342,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         let inner = self.doc.inner();
         let scroll = inner.viewport_scroll();
         let viewport = inner.viewport().clone();
+        let safe_area_insets = inner.safe_area_insets();
         let shell_provider = inner.shell_provider.clone();
         drop(inner);
 
@@ -303,6 +350,7 @@ impl<Rend: WindowRenderer> View<Rend> {
 
         let mut inner = self.doc.inner_mut();
         inner.set_viewport(viewport);
+        inner.set_safe_area_insets(safe_area_insets);
         inner.set_shell_provider(shell_provider);
         drop(inner);
 
@@ -360,22 +408,20 @@ impl<Rend: WindowRenderer> View<Rend> {
         let window_id = self.window_id();
         let animation_time = self.current_animation_time();
 
-        let (width, height) = {
-            let mut inner = self.doc.inner_mut();
-            inner.resolve(animation_time);
-            inner.viewport().window_size
-        };
+        self.doc.inner_mut().resolve(animation_time);
 
         // The render surface covers the entire window, including the safe area
-        let insets = self.safe_area_insets;
-        let width = width + insets.left + insets.right;
-        let height = height + insets.top + insets.bottom;
+        let (surface, _) = self.geometry();
 
         let proxy = self.proxy.clone();
-        self.renderer
-            .resume(Arc::new(self.window.clone()), width, height, move || {
+        self.renderer.resume(
+            Arc::new(self.window.clone()),
+            surface.width,
+            surface.height,
+            move || {
                 proxy.send_event(BlitzShellEvent::ResumeReady { window_id });
-            });
+            },
+        );
     }
 
     /// Finalize a previously-started resume. Should be called in response to a
@@ -393,20 +439,17 @@ impl<Rend: WindowRenderer> View<Rend> {
         // (its `set_size` only matches Active), so the surface created during
         // resume could be at a stale size by the time we get here.
         let animation_time = self.current_animation_time();
+        let (surface, (offset_x, offset_y)) = self.geometry();
         let mut inner = self.doc.inner_mut();
         inner.resolve(animation_time);
         let (width, height) = inner.viewport().window_size;
         let scale = inner.viewport().scale_f64();
-        let insets = self.safe_area_insets;
 
         #[cfg(feature = "custom-widget")]
         inner.can_create_surfaces(&mut self.renderer as _);
 
         // The render surface covers the entire window, including the safe area
-        self.renderer.set_size(
-            width + insets.left + insets.right,
-            height + insets.top + insets.bottom,
-        );
+        self.renderer.set_size(surface.width, surface.height);
 
         let time = self.scheduler.frame_time();
         let scheme = inner.viewport().color_scheme;
@@ -414,15 +457,7 @@ impl<Rend: WindowRenderer> View<Rend> {
             .run_hook(&mut self.renderer, time, scale, scheme);
 
         self.renderer.render(|scene| {
-            paint_scene(
-                scene,
-                &mut inner,
-                scale,
-                width,
-                height,
-                insets.left,
-                insets.top,
-            )
+            paint_scene(scene, &mut inner, scale, width, height, offset_x, offset_y)
         });
 
         let waker = create_waker(&self.proxy, window_id);
@@ -464,7 +499,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         #[cfg(target_os = "ios")]
         self.ios_request_redraw.set(false);
         let can_paint = self.is_visible && self.renderer.is_active();
-        let insets = self.safe_area_insets;
+        let (_, (offset_x, offset_y)) = self.geometry();
 
         let outcome = self.scheduler.frame(
             &mut *self.doc,
@@ -484,15 +519,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                 let (width, height) = inner.viewport().window_size;
                 let scale = inner.viewport().scale_f64();
                 renderer.render(|scene| {
-                    paint_scene(
-                        scene,
-                        &mut inner,
-                        scale,
-                        width,
-                        height,
-                        insets.left,
-                        insets.top,
-                    )
+                    paint_scene(scene, &mut inner, scale, width, height, offset_x, offset_y)
                 });
             },
         );
@@ -524,13 +551,38 @@ impl<Rend: WindowRenderer> View<Rend> {
     }
 
     pub fn pointer_coords(&self, position: PhysicalPosition<f64>) -> PointerCoords {
+        let (_, (left, top)) = self.geometry();
         let inner = self.doc.inner();
         pointer_coords(
             position,
             inner.viewport().scale_f64(),
-            self.safe_area_insets,
+            PhysicalInsets::new(top, left, 0, 0),
             inner.viewport_scroll(),
         )
+    }
+
+    /// Returns the surface size and the viewport's offset in it, under this window's safe-area mode.
+    fn geometry(&self) -> (PhysicalSize<u32>, (u32, u32)) {
+        let (_, offset) =
+            viewport_geometry(self.surface_size, self.safe_area_insets, self.safe_area);
+        (self.surface_size, offset)
+    }
+
+    /// Lays the document out for a new surface size, refreshing the safe-area insets.
+    fn resize_surface(&mut self, size: PhysicalSize<u32>) {
+        self.safe_area_insets = get_safe_area_insets(&*self.window);
+        self.surface_size = size;
+        let (viewport, _) = viewport_geometry(size, self.safe_area_insets, self.safe_area);
+        self.with_viewport(|v| v.window_size = (viewport.width, viewport.height));
+        self.sync_safe_area_insets();
+        self.request_redraw();
+    }
+
+    /// Passes the safe-area insets to the document, in CSS px.
+    fn sync_safe_area_insets(&mut self) {
+        let mut inner = self.doc.inner_mut();
+        let scale = inner.viewport().scale_f64();
+        inner.set_safe_area_insets(css_insets(self.safe_area_insets, scale));
     }
 
     pub fn window_id(&self) -> WindowId {
@@ -580,11 +632,8 @@ impl<Rend: WindowRenderer> View<Rend> {
         drop(viewport);
         drop(inner);
         if width > 0 && height > 0 {
-            let insets = self.safe_area_insets;
-            self.renderer.set_size(
-                width + insets.left + insets.right,
-                height + insets.top + insets.bottom,
-            );
+            self.renderer
+                .set_size(self.surface_size.width, self.surface_size.height);
             self.request_redraw();
         }
     }
@@ -638,12 +687,7 @@ impl<Rend: WindowRenderer> View<Rend> {
             return;
         };
         self.last_resize_at = None;
-
-        let insets = self.safe_area_insets;
-        let width = size.width.saturating_sub(insets.left + insets.right);
-        let height = size.height.saturating_sub(insets.top + insets.bottom);
-        self.with_viewport(|v| v.window_size = (width, height));
-        self.request_redraw();
+        self.resize_surface(size);
     }
 
     #[cfg(target_os = "macos")]
@@ -678,7 +722,6 @@ impl<Rend: WindowRenderer> View<Rend> {
                 }
             },
             WindowEvent::SurfaceResized(physical_size) => {
-                self.safe_area_insets = get_safe_area_insets(&*self.window);
                 // On WASM, defer the apply: wgpu's surface.configure clears the canvas,
                 // so running it every frame flickers during a drag. The browser stretches
                 // the stale backing store until the debounce timer settles.
@@ -691,16 +734,11 @@ impl<Rend: WindowRenderer> View<Rend> {
                     }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let insets = self.safe_area_insets;
-                    let width = physical_size.width - insets.left - insets.right;
-                    let height = physical_size.height - insets.top - insets.bottom;
-                    self.with_viewport(|v| v.window_size = (width, height));
-                    self.request_redraw();
-                }
+                self.resize_surface(physical_size);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.with_viewport(|v| v.set_hidpi_scale(scale_factor as f32));
+                self.sync_safe_area_insets();
                 self.request_redraw();
             }
             WindowEvent::ThemeChanged(theme) => {
@@ -988,5 +1026,34 @@ mod tests {
         assert_eq!((coords.screen_x, coords.screen_y), (60.0, 40.0));
         assert_eq!((coords.client_x, coords.client_y), (40.0, 30.0));
         assert_eq!((coords.page_x, coords.page_y), (50.0, 35.0));
+    }
+
+    /// An iPhone 17 Pro surface at 3x, with its portrait safe-area insets.
+    const SURFACE: PhysicalSize<u32> = PhysicalSize::new(1206, 2622);
+    const INSETS: PhysicalInsets<u32> = PhysicalInsets::new(186, 0, 102, 0);
+
+    #[test]
+    fn ignore_mode_covers_the_whole_surface() {
+        let geometry = viewport_geometry(SURFACE, INSETS, SafeArea::Ignore);
+        assert_eq!(geometry, (PhysicalSize::new(1206, 2622), (0, 0)));
+    }
+
+    #[test]
+    fn avoid_mode_matches_today() {
+        let geometry = viewport_geometry(SURFACE, INSETS, SafeArea::Avoid);
+        assert_eq!(geometry, (PhysicalSize::new(1206, 2334), (0, 186)));
+    }
+
+    #[test]
+    fn pointer_coords_under_ignore_are_screen_coords() {
+        let (_, (left, top)) = viewport_geometry(SURFACE, INSETS, SafeArea::Ignore);
+        let coords = pointer_coords(
+            PhysicalPosition::new(300.0, 90.0),
+            3.0,
+            PhysicalInsets::new(top, left, 0, 0),
+            blitz_dom::Point { x: 0.0, y: 0.0 },
+        );
+        assert_eq!((coords.screen_x, coords.screen_y), (100.0, 30.0));
+        assert_eq!((coords.client_x, coords.client_y), (100.0, 30.0));
     }
 }

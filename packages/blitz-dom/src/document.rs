@@ -27,6 +27,7 @@ use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::node_id::NodeId;
 use blitz_traits::shell::{DummyShellProvider, FrameTime, ScrollPhysics, ShellProvider, Viewport};
 use cursor_icon::CursorIcon;
+use euclid::SideOffsets2D;
 use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, local_name};
 use parley::{FontContext, PlainEditorDriver};
@@ -68,6 +69,7 @@ use style::{
     stylist::Stylist,
 };
 use style_dom::ElementState;
+use style_traits::CSSPixel;
 use stylo_taffy::CopyStyleGetters;
 use thin_vec::ThinVec;
 use url::Url;
@@ -331,6 +333,10 @@ pub struct BaseDocument {
     pub(crate) subdocument_depth: usize,
     /// The physics that touch-driven scrolling follows.
     pub(crate) scroll_physics: ScrollPhysics,
+    /// The window's safe-area insets, in CSS px.
+    pub(crate) safe_area_insets: SideOffsets2D<f32, CSSPixel>,
+    /// The user-agent sheet that exposes `safe_area_insets` as custom properties.
+    pub(crate) safe_area_sheet: Option<UserAgentStylesheet>,
 
     // Events
     pub(crate) tx: Sender<DocumentEvent>,
@@ -597,6 +603,8 @@ impl BaseDocument {
             incremental_layout: config.incremental.unwrap_or(true),
             subdocument_depth: config.subdocument_depth,
             scroll_physics: config.scroll_physics,
+            safe_area_insets: SideOffsets2D::zero(),
+            safe_area_sheet: None,
             devtool_settings: DevtoolSettings::default(),
             url: base_url,
             nodes_to_stylesheet: BTreeMap::new(),
@@ -1320,6 +1328,30 @@ impl BaseDocument {
             self.stylist
                 .remove_stylesheet(sheet.0.clone(), &self.guard.read());
         }
+    }
+
+    /// Sets the safe-area insets, which CSS reads as `--safe-area-inset-{top,right,bottom,left}`.
+    pub fn set_safe_area_insets(&mut self, insets: SideOffsets2D<f32, CSSPixel>) {
+        if self.safe_area_sheet.is_some() && self.safe_area_insets == insets {
+            return;
+        }
+        if let Some(old) = self.safe_area_sheet.take() {
+            self.remove_user_agent_stylesheet(&old);
+        }
+        let css = format!(
+            ":root {{ --safe-area-inset-top: {}px; --safe-area-inset-right: {}px; \
+             --safe-area-inset-bottom: {}px; --safe-area-inset-left: {}px }}",
+            insets.top, insets.right, insets.bottom, insets.left
+        );
+        let sheet = UserAgentStylesheet::parse(&css);
+        self.add_user_agent_stylesheet(sheet.clone());
+        self.safe_area_sheet = Some(sheet);
+        self.safe_area_insets = insets;
+    }
+
+    /// Returns the safe-area insets, in CSS px.
+    pub fn safe_area_insets(&self) -> SideOffsets2D<f32, CSSPixel> {
+        self.safe_area_insets
     }
 
     /// The document's base URL

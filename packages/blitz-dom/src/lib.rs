@@ -129,6 +129,9 @@ pub type SelectorList = selectors::SelectorList<style::selector_parser::Selector
 pub use events::{EventDriver, EventHandler, NoopEventHandler};
 pub use html::{DummyHtmlParserProvider, HtmlParserProvider};
 pub use util::{Point, decode_font_bytes};
+// The offsets and unit that `BaseDocument::set_safe_area_insets` takes.
+pub use euclid::SideOffsets2D;
+pub use style_traits::CSSPixel;
 
 /// Convenience builder for the one-font case: produces a [`FontContext`] with
 /// system-font discovery disabled and the supplied font registered as the

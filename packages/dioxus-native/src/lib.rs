@@ -268,7 +268,8 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
     let devtools_shortcuts = std::mem::take(&mut config.devtools_shortcuts);
     let config =
         WindowConfig::with_attributes(Box::new(doc) as _, renderer, config.window_attributes)
-            .with_time_source(config.time_source);
+            .with_time_source(config.time_source)
+            .with_safe_area(config.safe_area);
     #[cfg(feature = "vello")]
     let config = config.with_frame_hook(Box::new(
         |renderer: &mut DioxusNativeWindowRenderer, time, scale, scheme| {

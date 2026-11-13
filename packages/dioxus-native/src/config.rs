@@ -24,7 +24,6 @@ pub struct Config {
     pub(crate) glass_backend: Option<Box<dyn anyrender_vello::glass::GlassBackend + Send>>,
     #[cfg(feature = "vello")]
     pub(crate) glass_inputs: Option<GlassInputs>,
-    #[allow(dead_code, reason = "stored for the shell, which doesn't read it yet")]
     pub(crate) safe_area: SafeArea,
     pub(crate) scroll_physics: ScrollPhysics,
 }
@@ -176,7 +175,7 @@ impl Config {
         self
     }
 
-    /// Set whether the document avoids the safe area; currently stored but not yet applied.
+    /// Set whether the document is laid out inside the safe area or under the whole window.
     pub fn with_safe_area(mut self, safe_area: SafeArea) -> Self {
         self.safe_area = safe_area;
         self
