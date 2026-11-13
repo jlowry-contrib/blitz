@@ -1549,7 +1549,21 @@ impl<'dom> DomTraversal<BlitzNode<'dom>> for RecalcStyle<'_> {
         if let Some(el) = node.as_element() {
             // let mut data = el.mutate_data().unwrap();
             let mut data = unsafe { el.ensure_data() };
+            let old_style = data.styles.get_primary().cloned();
             recalc_style_at(self, context, el, &mut data, note_child);
+
+            // Stylo damages a custom property change as a repaint only, but the glass
+            // properties also decide whether the element is a stacking context.
+            if let (Some(old), Some(new)) = (old_style, data.styles.get_primary())
+                && !style::servo_arc::Arc::ptr_eq(&old, new)
+                && crate::glass::glass_role_changed(
+                    &old,
+                    new,
+                    el.parent_primary_styles().as_deref().map(|s| &**s),
+                )
+            {
+                data.damage.insert(RestyleDamage::REBUILD_STACKING_CONTEXT);
+            }
 
             sync_pseudo_element_styles(el, &data, &self.nodes_needing_style_image_flush);
             if let Some(style) = data.styles.get_primary() {

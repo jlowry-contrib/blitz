@@ -1154,7 +1154,9 @@ impl Node {
     }
 
     /// The primary styles of this node's parent, if it has any.
-    fn parent_primary_styles(&self) -> Option<impl Deref<Target = ServoArc<ComputedValues>> + '_> {
+    pub(crate) fn parent_primary_styles(
+        &self,
+    ) -> Option<impl Deref<Target = ServoArc<ComputedValues>> + '_> {
         self.tree().get(self.parent?)?.primary_styles()
     }
 
@@ -1166,6 +1168,14 @@ impl Node {
         };
         let parent = self.parent_primary_styles();
         crate::glass::has_glass(&style, parent.as_deref().map(|s| &**s))
+    }
+
+    /// This node's own `--glass-container` merge spacing in CSS px, or `None` when it isn't a
+    /// glass container; cheaper than [`Node::glass_props`].
+    pub fn glass_container(&self) -> Option<f32> {
+        let style = self.primary_styles()?;
+        let parent = self.parent_primary_styles();
+        crate::glass::glass_container(&style, parent.as_deref().map(|s| &**s))
     }
 
     /// This node's glass custom properties, or `None` when it has no styles.
@@ -1406,8 +1416,13 @@ impl Node {
             return true;
         }
 
+        // A glass container is a stacking context, so its positioned and z-indexed glass
+        // descendants paint in its subtree and join its group.
         let parent_style = self.parent_primary_styles();
-        if crate::glass::has_glass(&style, parent_style.as_deref().map(|s| &**s)) {
+        let parent_style = parent_style.as_deref().map(|s| &**s);
+        if crate::glass::has_glass(&style, parent_style)
+            || crate::glass::glass_container(&style, parent_style).is_some()
+        {
             return true;
         }
         // TODO: contain
@@ -1417,7 +1432,7 @@ impl Node {
 
     /// Whether this node's styles apply an atomic paint effect (opacity, filter,
     /// clip-path, mask) to its subtree.
-    pub(crate) fn applies_atomic_paint_effect(&self) -> bool {
+    pub fn applies_atomic_paint_effect(&self) -> bool {
         use style::values::computed::basic_shape::ClipPath;
         use style::values::generics::image::GenericImage;
 

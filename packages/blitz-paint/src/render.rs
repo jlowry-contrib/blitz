@@ -8,9 +8,7 @@ mod mask;
 
 use blitz_dom::CopyStyleGetters;
 use std::cell::RefCell;
-use std::collections::HashMap;
-#[cfg(feature = "tracing")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::kurbo_css::{CornerCurve, CssBox};
@@ -23,7 +21,7 @@ use crate::layers::LayerManager;
 use crate::sizing::compute_object_fit;
 use crate::text::{DrawTextContext, TextPaintOptions};
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
-use anyrender::glass::GlassGroup;
+use anyrender::glass::{GlassGroup, GlassShape};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::glass::{CornerStyleProp, GlassProps};
 use blitz_dom::node::{
@@ -143,6 +141,8 @@ pub struct BlitzDomPainter<'dom, 'a> {
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
 
+    /// Glass nodes whose shape a glass container's group already draws this paint.
+    pub(crate) glass_collected: RefCell<HashSet<NodeId>>,
     /// Glass nodes whose unparsable glass properties have been logged.
     #[cfg(feature = "tracing")]
     pub(crate) glass_invalid_logged: RefCell<HashSet<NodeId>>,
@@ -187,6 +187,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             draw_text_context: RefCell::new(DrawTextContext::default()),
             selection_ranges,
             custom_widget_scenes,
+            glass_collected: RefCell::default(),
             #[cfg(feature = "tracing")]
             glass_invalid_logged: RefCell::default(),
             #[cfg(feature = "tracing")]
@@ -194,14 +195,19 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         }
     }
 
-    /// The glass group of a lone glass element, whose border box is `frame`, if it draws one.
-    fn glass_group(
+    /// The glass shape `id` of the element `node_id`, whose border box is `frame`, if it draws one.
+    fn glass_shape(
         &self,
+        #[cfg_attr(
+            not(feature = "tracing"),
+            expect(unused_variables, reason = "only the glass logs name the node")
+        )]
         node_id: NodeId,
         frame: &CssBox,
         transform: Affine,
         props: &GlassProps,
-    ) -> Option<GlassGroup> {
+        id: u32,
+    ) -> Option<GlassShape> {
         #[cfg(feature = "tracing")]
         if !props.invalid.is_empty() && self.glass_invalid_logged.borrow_mut().insert(node_id) {
             tracing::warn!(
@@ -211,7 +217,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 "unregistered glass properties didn't parse and read as their defaults"
             );
         }
-        let shape = glass::glass_shape(frame, props, transform, self.scale, 0)?;
+        let shape = glass::glass_shape(frame, props, transform, self.scale, id)?;
         #[cfg(feature = "tracing")]
         if matches!(shape.kind, anyrender::glass::ShapeKind::RoundedRect { .. })
             && glass::has_elliptical_corner(frame)
@@ -223,7 +229,215 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 "glass takes the smaller radius of each elliptical corner"
             );
         }
-        Some(GlassGroup::new(vec![shape]).with_id(node_id.as_u64()))
+        Some(shape)
+    }
+
+    /// The glass groups `node` emits.
+    ///
+    /// A lone glass element groups only itself. A glass container groups its own glass, if any,
+    /// with every glass element in its paint subtree that no nested container or layer claims
+    /// (see [`Self::collect_glass`]). The group draws where the container's own glass would,
+    /// before its background. The container's clip-path and mask layers clip it, and so does
+    /// its effect layer, to the border box, when that layer is pushed for opacity, a filter or
+    /// a kept backdrop-filter.
+    ///
+    /// A container that clips its content draws its members inside that clip instead, as a
+    /// second group, so its own glass, outside the clip, stays a lone group with the node id.
+    fn glass_groups(
+        &self,
+        node: &Node,
+        frame: &CssBox,
+        transform: Affine,
+        paints_own_box: bool,
+        clips_content: bool,
+    ) -> GlassGroups {
+        let spacing = node.glass_container();
+        let own_props = (paints_own_box && node.has_glass())
+            .then(|| node.glass_props())
+            .flatten();
+        if spacing.is_none() && own_props.is_none() {
+            return GlassGroups::default();
+        }
+
+        let mut members = Vec::new();
+        if let Some(props) = own_props
+            && let Some(shape) = self.glass_shape(node.id, frame, transform, &props, 0)
+        {
+            members.push((shape, props.union));
+        }
+        let draws_own = !members.is_empty();
+
+        let Some(spacing) = spacing else {
+            return GlassGroups {
+                own: group_of(members, node.id.as_u64(), 0.0),
+                inner: None,
+                draws_own,
+            };
+        };
+
+        let (own, mut members) = if clips_content {
+            (group_of(members, node.id.as_u64(), 0.0), Vec::new())
+        } else {
+            (None, members)
+        };
+        let children_transform = self.scrolled_transform(node, transform);
+        for (child_id, child_transform) in self.paint_children(node, children_transform) {
+            self.collect_glass(child_id, child_transform, &mut members);
+        }
+        let spacing = f64::from(spacing);
+        if clips_content {
+            GlassGroups {
+                own,
+                inner: group_of(members, node.id.as_u64() | CLIPPED_MEMBERS_ID_BIT, spacing),
+                draws_own,
+            }
+        } else {
+            GlassGroups {
+                own: group_of(members, node.id.as_u64(), spacing),
+                inner: None,
+                draws_own,
+            }
+        }
+    }
+
+    /// Adds the glass of `node_id`, painted under `parent_transform`, and of its paint subtree
+    /// to a container's `members`.
+    ///
+    /// It skips what doesn't paint and nested containers. Glass under a layer between it and
+    /// the container (opacity, filter, clip-path, mask, blend, isolation, CSS `clip`, an
+    /// overflow clip or a backdrop-filter) stays out, and so does glass whose own layer would
+    /// hold it, so each draws as a lone group inside its layers.
+    fn collect_glass(
+        &self,
+        node_id: NodeId,
+        parent_transform: Affine,
+        members: &mut Vec<(GlassShape, Option<style::Atom>)>,
+    ) {
+        let node = &self.dom.as_ref().tree()[node_id];
+        // The same early returns as `render_element`, which skip the node's whole subtree.
+        if !matches!(
+            node.data,
+            NodeData::Element(_) | NodeData::AnonymousBlock(_)
+        ) || matches!(node.taffy_display(), taffy::Display::None)
+            || (node.local_name() == "input" && node.attr(local_name!("type")) == Some("hidden"))
+        {
+            return;
+        }
+        let Some(styles) = node.primary_styles() else {
+            return;
+        };
+        if styles.get_inherited_box().visibility != StyloVisibility::Visible
+            || styles.get_effects().opacity == 0.0
+        {
+            return;
+        }
+        // A nested container groups its own subtree when it paints, and a layer over the
+        // node's own glass holds the glass of its subtree too.
+        if node.glass_container().is_some() || self.layers_own_glass(node, &styles) {
+            return;
+        }
+
+        let transform = self.node_transform(node, parent_transform);
+        let mut collected = false;
+        if !node.is_inline_with_only_block_children()
+            && node.has_glass()
+            && let Some(props) = node.glass_props()
+        {
+            let frame = self.css_box(node, &styles, node.final_layout());
+            let id = members.len() as u32;
+            if let Some(shape) = self.glass_shape(node_id, &frame, transform, &props, id) {
+                self.glass_collected.borrow_mut().insert(node_id);
+                members.push((shape, props.union));
+                collected = true;
+            }
+        }
+
+        // The overflow clip and a kept backdrop-filter layer hold only what the node paints
+        // after its own glass would.
+        let backdrop_layer = !collected && !styles.get_effects().backdrop_filter.0.is_empty();
+        if self.should_clip_node(node, &styles) || backdrop_layer {
+            return;
+        }
+        let children_transform = self.scrolled_transform(node, transform);
+        for (child_id, child_transform) in self.paint_children(node, children_transform) {
+            self.collect_glass(child_id, child_transform, members);
+        }
+    }
+
+    /// Whether painting `node` pushes a layer around everything it paints, its own glass
+    /// included: opacity, filter, clip-path, mask, blend, isolation or CSS `clip`.
+    fn layers_own_glass(&self, node: &Node, styles: &ComputedValues) -> bool {
+        use style::computed_values::position::T as Position;
+        use style::values::generics::ClipRectOrAuto;
+
+        let effects = styles.get_effects();
+        node.applies_atomic_paint_effect()
+            || styles.get_box().isolation == Isolation::Isolate
+            || convert_blend_mode(effects.mix_blend_mode) != BlendMode::default()
+            || (matches!(
+                styles.get_box().position,
+                Position::Absolute | Position::Fixed
+            ) && matches!(effects.clip, ClipRectOrAuto::Rect(_)))
+    }
+
+    /// The children `node` paints, in paint order, each with the transform it paints under.
+    ///
+    /// `transform` is `node`'s own transform with its scroll offset applied. The order is the
+    /// negative z-index hoisted children, the regular children, then the positive ones.
+    fn paint_children<'n>(
+        &'n self,
+        node: &'n Node,
+        transform: Affine,
+    ) -> impl Iterator<Item = (NodeId, Affine)> + 'n {
+        let hoisted = move |child: &blitz_dom::HoistedPaintChild| {
+            let position = child.position(node.tree(), node.id);
+            let pos = Vec2::new(position.x as f64, position.y as f64) * self.scale;
+            (child.node_id, transform.pre_translate(pos))
+        };
+        let negative = node
+            .stacking_context
+            .iter()
+            .flat_map(|sc| sc.neg_z_hoisted_children())
+            .map(hoisted);
+        let positive = node
+            .stacking_context
+            .iter()
+            .flat_map(|sc| sc.pos_z_hoisted_children())
+            .map(hoisted);
+
+        // The list is re-borrowed per child, so painting a child never overlaps a borrow.
+        let mut index = 0;
+        let regular = std::iter::from_fn(move || {
+            let child_id = *node.paint_children.borrow().as_ref()?.get(index)?;
+            index += 1;
+            Some(child_id)
+        })
+        .map(move |child_id| {
+            // Fixed-position children of the root element are positioned against
+            // the viewport and do not scroll with it, so cancel out the viewport
+            // scroll (applied in `paint_scene`). A fixed box contained by a
+            // transformed ancestor scrolls with it like any out-of-flow box.
+            let child = &self.dom.as_ref().tree()[child_id];
+            let child_transform = if child.taffy_position() == taffy::Position::Fixed
+                && Some(node.id) == self.root_element_id
+            {
+                let scroll = self.dom.as_ref().viewport_scroll();
+                transform.pre_translate(Vec2::new(scroll.x, scroll.y) * self.scale)
+            } else if let Some(offset) = child.lifted_paint_offset(node.id) {
+                transform.pre_translate(Vec2::new(offset.x as f64, offset.y as f64) * self.scale)
+            } else {
+                transform
+            };
+            (child_id, child_transform)
+        });
+
+        negative.chain(regular).chain(positive)
+    }
+
+    /// `node`'s boxes and radii in device px for `layout`, as its background paints them.
+    fn css_box(&self, node: &Node, style: &ComputedValues, layout: &Layout) -> CssBox {
+        let continuous = node.corner_style() == Some(CornerStyleProp::Continuous);
+        create_css_rect(style, layout, self.scale, continuous)
     }
 
     /// Draws `group`, whose shapes are in CSS px.
@@ -250,6 +464,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         if self.dom.has_pending_critical_resources() {
             return;
         }
+        self.glass_collected.borrow_mut().clear();
 
         // Simply render the document (the root element (note that this is not the same as the root node)))
         // scene.reset();
@@ -647,12 +862,15 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         );
 
         let paints_own_box = !node.is_inline_with_only_block_children();
-        // Glass, when drawn, replaces the element's own backdrop-filter.
-        let glass_group = if paints_own_box && node.has_glass() {
-            node.glass_props()
-                .and_then(|props| self.glass_group(node_id, &cx.frame, cx.transform, &props))
+        // Glass, when drawn, replaces the element's own backdrop-filter, whether this element
+        // draws it or a container's group already does.
+        let glass = if self.glass_collected.borrow().contains(&node_id) {
+            GlassGroups {
+                draws_own: true,
+                ..GlassGroups::default()
+            }
         } else {
-            None
+            self.glass_groups(node, &cx.frame, cx.transform, paints_own_box, should_clip)
         };
 
         cx.draw_outline(scene);
@@ -679,9 +897,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 let unscrolled_transform = cx.transform;
 
                 let filter = convert_filters(&effects.filter.0).map(Arc::new);
-                let backdrop_filter = match glass_group {
-                    Some(_) => None,
-                    None => convert_filters(&effects.backdrop_filter.0).map(Arc::new),
+                let backdrop_filter = match glass.draws_own {
+                    true => None,
+                    false => convert_filters(&effects.backdrop_filter.0).map(Arc::new),
                 };
 
                 // Adjust effect layer clip by filter expansion area
@@ -715,7 +933,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     filter,
                     backdrop_filter,
                     |scene| {
-                        if let Some(group) = &glass_group {
+                        if let Some(group) = &glass.own {
                             self.draw_glass(scene, group);
                         }
                         if paints_own_box {
@@ -754,6 +972,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                 };
 
                                 cx.transform = self.scrolled_transform(node, cx.transform);
+                                // Before the content, as the group of a container that
+                                // doesn't clip draws before its background.
+                                if let Some(group) = &glass.inner {
+                                    self.draw_glass(scene, group);
+                                }
                                 cx.draw_image(scene);
                                 #[cfg(feature = "svg")]
                                 cx.draw_svg(scene);
@@ -835,8 +1058,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // todo: maybe cache this so we don't need to constantly be figuring it out
         // It is quite a bit of math to calculate during render/traverse
         // Also! we can cache the bezpaths themselves, saving us a bunch of work
-        let continuous = node.corner_style() == Some(CornerStyleProp::Continuous);
-        let frame = create_css_rect(&style, &layout, scale, continuous);
+        let frame = self.css_box(node, &style, &layout);
 
         let element = node.element_data().unwrap();
 
@@ -859,6 +1081,46 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             custom_widget_scene,
         }
     }
+}
+
+/// Set on a clipping container's node id to give its members' group an id of its own, apart
+/// from the container's own glass; node ids are slab indices, far below this bit.
+const CLIPPED_MEMBERS_ID_BIT: u64 = 1 << 63;
+
+/// The glass groups an element draws.
+#[derive(Default)]
+struct GlassGroups {
+    /// The group drawn just before the element's background.
+    own: Option<GlassGroup>,
+    /// A clipping container's members, drawn inside its clip before its content.
+    inner: Option<GlassGroup>,
+    /// Whether the element's own glass is drawn, by itself or by its container.
+    draws_own: bool,
+}
+
+/// The group of `members`, in order, with every pair that shares a union; `None` when empty.
+fn group_of(
+    members: Vec<(GlassShape, Option<style::Atom>)>,
+    id: u64,
+    merge_spacing: f64,
+) -> Option<GlassGroup> {
+    if members.is_empty() {
+        return None;
+    }
+    let mut unions = Vec::new();
+    for (i, (a, union)) in members.iter().enumerate() {
+        let Some(union) = union else { continue };
+        for (b, other) in &members[i + 1..] {
+            if other.as_ref() == Some(union) {
+                unions.push((a.id, b.id));
+            }
+        }
+    }
+    let mut group =
+        GlassGroup::new(members.into_iter().map(|(shape, _)| shape).collect()).with_id(id);
+    group.merge_spacing = merge_spacing;
+    group.unions = unions;
+    Some(group)
 }
 
 fn to_image_quality(image_rendering: ImageRendering) -> peniko::ImageQuality {
@@ -1235,67 +1497,11 @@ impl ElementCx<'_, '_> {
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
-        // Negative z_index hoisted nodes
-
-        if let Some(hoisted) = &self.node.stacking_context {
-            for hoisted_child in hoisted.neg_z_hoisted_children() {
-                let position = hoisted_child.position(self.node.tree(), self.node.id);
-                let pos = kurbo::Vec2 {
-                    x: position.x as f64 * self.scale,
-                    y: position.y as f64 * self.scale,
-                };
-                self.render_node(
-                    scene,
-                    hoisted_child.node_id,
-                    parent_style_transform.pre_translate(pos),
-                    clip_rect,
-                );
-            }
-        }
-
-        // Regular children
-        if let Some(children) = &*self.node.paint_children.borrow() {
-            for child_id in children {
-                // Fixed-position children of the root element are positioned against
-                // the viewport and do not scroll with it, so cancel out the viewport
-                // scroll (applied in `paint_scene`). A fixed box contained by a
-                // transformed ancestor scrolls with it like any out-of-flow box.
-                let child = &self.context.dom.as_ref().tree()[*child_id];
-                let child_transform = if child.taffy_position() == taffy::Position::Fixed
-                    && Some(self.node.id) == self.context.root_element_id
-                {
-                    let scroll = self.context.dom.as_ref().viewport_scroll();
-                    parent_style_transform.pre_translate(kurbo::Vec2 {
-                        x: scroll.x * self.scale,
-                        y: scroll.y * self.scale,
-                    })
-                } else if let Some(offset) = child.lifted_paint_offset(self.node.id) {
-                    parent_style_transform.pre_translate(kurbo::Vec2 {
-                        x: offset.x as f64 * self.scale,
-                        y: offset.y as f64 * self.scale,
-                    })
-                } else {
-                    parent_style_transform
-                };
-                self.render_node(scene, *child_id, child_transform, clip_rect);
-            }
-        }
-
-        // Positive z_index hoisted nodes
-        if let Some(hoisted) = &self.node.stacking_context {
-            for hoisted_child in hoisted.pos_z_hoisted_children() {
-                let position = hoisted_child.position(self.node.tree(), self.node.id);
-                let pos = kurbo::Vec2 {
-                    x: position.x as f64 * self.scale,
-                    y: position.y as f64 * self.scale,
-                };
-                self.render_node(
-                    scene,
-                    hoisted_child.node_id,
-                    parent_style_transform.pre_translate(pos),
-                    clip_rect,
-                );
-            }
+        for (child_id, child_transform) in self
+            .context
+            .paint_children(self.node, parent_style_transform)
+        {
+            self.render_node(scene, child_id, child_transform, clip_rect);
         }
     }
 

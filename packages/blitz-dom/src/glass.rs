@@ -210,6 +210,30 @@ pub(crate) fn has_glass(style: &ComputedValues, parent: Option<&ComputedValues>)
     matches!(r.read(Prop::Glass, parse_variant), Some(Some(_)))
 }
 
+/// Whether `--glass` or `--glass-container` makes a stacking context of only one of `old` and
+/// `new`, read against `parent` and, to catch a value that newly matches an inherited one, alone.
+pub(crate) fn glass_role_changed(
+    old: &ComputedValues,
+    new: &ComputedValues,
+    parent: Option<&ComputedValues>,
+) -> bool {
+    let role = |style, parent| has_glass(style, parent) || glass_container(style, parent).is_some();
+    role(old, parent) != role(new, parent) || role(old, None) != role(new, None)
+}
+
+/// `style`'s own `--glass-container` spacing in CSS px, as [`GlassProps::read`] reads it.
+pub(crate) fn glass_container(
+    style: &ComputedValues,
+    parent: Option<&ComputedValues>,
+) -> Option<f32> {
+    let mut r = Reader {
+        style,
+        parent,
+        invalid: SmallVec::new(),
+    };
+    r.read(Prop::Container, parse_spacing).flatten()
+}
+
 /// The glass properties `GlassProps` reads, indexing `NAMES` and `ATOMS`.
 #[derive(Clone, Copy)]
 enum Prop {
