@@ -11,6 +11,7 @@
 mod application;
 mod convert_events;
 mod event;
+mod frame;
 mod net;
 mod window;
 
@@ -21,7 +22,8 @@ mod devtools;
 
 pub use crate::application::BlitzApplication;
 pub use crate::event::{BlitzShellEvent, BlitzShellProxy};
-pub use crate::window::{View, WindowConfig};
+pub use crate::frame::{FrameClock, FrameOutcome, FrameScheduler, StepAck, TimeSource};
+pub use crate::window::{View, WindowConfig, pointer_coords};
 
 #[cfg(feature = "data-uri")]
 pub use crate::net::DataUriNetProvider;

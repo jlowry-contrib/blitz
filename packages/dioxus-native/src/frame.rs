@@ -6,17 +6,8 @@ use std::sync::Arc;
 use blitz_traits::shell::{FrameTime, Presented, ShellProvider};
 use dioxus_core::{try_consume_context, use_hook};
 use dioxus_html::{PointerData, TouchData};
+use dioxus_native_dom::{NativePointerData, NativeTouchData};
 use dioxus_signals::{ReadSignal, Signal};
-
-/// The clock that drives a window's frames.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TimeSource {
-    /// Frames follow the wall clock and the display.
-    #[default]
-    Wall,
-    /// Frames advance only when a [`FrameClock`] steps them; currently runs on the wall clock.
-    Manual,
-}
 
 /// A handle that steps a window running on the manual clock.
 #[derive(Clone, Debug)]
@@ -49,16 +40,16 @@ pub fn use_frame_clock() -> Option<FrameClock> {
     None
 }
 
-/// Returns a pointer event's time stamp in seconds on the frame clock; currently `None`.
+/// Returns a pointer event's time stamp in seconds on the frame clock, if Blitz produced it.
 pub fn pointer_time_stamp(data: &PointerData) -> Option<f64> {
-    let _ = data;
-    None
+    data.downcast::<NativePointerData>()
+        .map(NativePointerData::time_stamp)
 }
 
-/// Returns a touch event's time stamp in seconds on the frame clock; currently `None`.
+/// Returns a touch event's time stamp in seconds on the frame clock, if Blitz produced it.
 pub fn touch_time_stamp(data: &TouchData) -> Option<f64> {
-    let _ = data;
-    None
+    data.downcast::<NativeTouchData>()
+        .map(NativeTouchData::time_stamp)
 }
 
 #[cfg(test)]

@@ -115,6 +115,12 @@ impl<Rend: WindowRenderer> BlitzApplication<Rend> {
                     debug_assert!(ok, "ResumeReady received but renderer not ready");
                 }
             }
+            BlitzShellEvent::Step { window_id, dt, ack } => {
+                // A step for a closed window drops its acknowledgement, which reports it unpainted.
+                if let Some(window) = self.windows.get_mut(&window_id) {
+                    window.step(dt, ack);
+                }
+            }
             BlitzShellEvent::RequestRedraw { doc_id } => {
                 // TODO: Handle multiple documents per window
                 if let Some(window) = self.window_mut_by_doc_id(doc_id) {

@@ -1,3 +1,4 @@
+use crate::frame::StepAck;
 use blitz_traits::navigation::NavigationOptions;
 use blitz_traits::net::NetWaker;
 use futures_util::task::ArcWake;
@@ -29,6 +30,13 @@ pub enum BlitzShellEvent {
 
     RequestRedraw {
         doc_id: usize,
+    },
+
+    /// Advance a window on the manual clock by one frame of `dt` seconds, then acknowledge it.
+    Step {
+        window_id: WindowId,
+        dt: f64,
+        ack: StepAck,
     },
 
     /// Close a window programmatically (e.g. a custom titlebar close button).

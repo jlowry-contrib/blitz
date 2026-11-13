@@ -5,8 +5,9 @@ use crate::convert_events::{
     winit_key_event_to_blitz, winit_modifiers_to_kbt_modifiers,
 };
 use crate::event::{BlitzShellEvent, BlitzShellProxy, create_waker};
+use crate::frame::{FrameClock, FrameScheduler, StepAck, TimeSource};
 use anyrender::WindowRenderer;
-use blitz_dom::Document;
+use blitz_dom::{BaseDocument, Document};
 use blitz_paint::paint_scene;
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, MouseEventButton,
@@ -20,7 +21,6 @@ use atomic_refcell::AtomicRefCell;
 use std::any::Any;
 use std::sync::Arc;
 use std::task::Waker;
-use web_time::Instant;
 use winit::event::{ButtonSource, ElementState, MouseButton};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Theme, WindowAttributes, WindowId};
@@ -40,10 +40,46 @@ fn get_safe_area_insets(window: &dyn Window) -> PhysicalInsets<u32> {
     window.safe_area()
 }
 
+/// Converts a physical pointer position into CSS-px coordinates, net of the safe-area insets.
+pub fn pointer_coords(
+    position: PhysicalPosition<f64>,
+    scale: f64,
+    insets: PhysicalInsets<u32>,
+    scroll: blitz_dom::Point<f64>,
+) -> PointerCoords {
+    let LogicalPosition::<f32> {
+        x: screen_x,
+        y: screen_y,
+    } = position.to_logical(scale);
+    let client_x = screen_x - (insets.left as f64 / scale) as f32;
+    let client_y = screen_y - (insets.top as f64 / scale) as f32;
+    let page_x = client_x + scroll.x as f32;
+    let page_y = client_y + scroll.y as f32;
+
+    PointerCoords {
+        screen_x,
+        screen_y,
+        client_x,
+        client_y,
+        page_x,
+        page_y,
+    }
+}
+
+/// Passes the document's changes to `update` and clears them, unless it is still
+/// waiting on render-blocking resources or nothing changed.
+fn take_tree_changes(doc: &mut BaseDocument, update: impl FnOnce(&BaseDocument)) {
+    if !doc.has_pending_critical_resources() && doc.has_changes() {
+        update(doc);
+        doc.clear_changes();
+    }
+}
+
 pub struct WindowConfig<Rend: WindowRenderer> {
     doc: Box<dyn Document>,
     pub(crate) attributes: WindowAttributes,
     renderer: Rend,
+    time_source: TimeSource,
 }
 
 impl<Rend: WindowRenderer> WindowConfig<Rend> {
@@ -60,7 +96,14 @@ impl<Rend: WindowRenderer> WindowConfig<Rend> {
             doc,
             attributes,
             renderer,
+            time_source: TimeSource::default(),
         }
+    }
+
+    /// Sets the clock that drives the window's frames.
+    pub fn with_time_source(mut self, time_source: TimeSource) -> Self {
+        self.time_source = time_source;
+        self
     }
 }
 
@@ -94,7 +137,7 @@ pub struct View<Rend: WindowRenderer> {
     /// The events stored here always have an empty `active_pointers` list to
     /// avoid a reference cycle.
     pub active_events: Arc<AtomicRefCell<Vec<BlitzPointerEvent>>>,
-    pub animation_timer: Option<Instant>,
+    scheduler: FrameScheduler<dyn Document, Rend>,
     pub is_visible: bool,
     pub safe_area_insets: PhysicalInsets<u32>,
 
@@ -211,7 +254,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         Self {
             renderer: config.renderer,
             waker: None,
-            animation_timer: None,
+            scheduler: FrameScheduler::new(config.time_source),
             keyboard_modifiers: Default::default(),
             proxy: proxy.clone(),
             window: winit_window.clone(),
@@ -278,14 +321,20 @@ impl<Rend: WindowRenderer> View<Rend> {
             .unwrap()
     }
 
-    pub fn current_animation_time(&mut self) -> f64 {
-        match &self.animation_timer {
-            Some(start) => Instant::now().duration_since(*start).as_secs_f64(),
-            None => {
-                self.animation_timer = Some(Instant::now());
-                0.0
-            }
-        }
+    /// Returns the time, in seconds, of the latest frame.
+    pub fn current_animation_time(&self) -> f64 {
+        self.scheduler.frame_time().t
+    }
+
+    /// Returns the time of the latest frame.
+    pub fn frame_time(&self) -> FrameTime {
+        self.scheduler.frame_time()
+    }
+
+    /// Returns a handle that steps this window, when it runs on the manual clock.
+    pub fn frame_clock(&self) -> Option<FrameClock> {
+        (self.scheduler.time_source() == TimeSource::Manual)
+            .then(|| FrameClock::new(self.proxy.clone(), self.window_id()))
     }
 }
 
@@ -358,12 +407,15 @@ impl<Rend: WindowRenderer> View<Rend> {
             )
         });
 
-        self.waker = Some(create_waker(&self.proxy, window_id));
+        let waker = create_waker(&self.proxy, window_id);
+        self.scheduler.set_waker(Some(waker.clone()));
+        self.waker = Some(waker);
         true
     }
 
     pub fn suspend(&mut self) {
         self.waker = None;
+        self.scheduler.set_waker(None);
         self.renderer.suspend();
 
         #[cfg(feature = "custom-widget")]
@@ -373,7 +425,7 @@ impl<Rend: WindowRenderer> View<Rend> {
     pub fn poll(&mut self) -> bool {
         if let Some(waker) = &self.waker {
             let cx = std::task::Context::from_waker(waker);
-            if self.doc.poll(Some(cx)) {
+            if self.scheduler.poll(&mut *self.doc, Some(cx)) {
                 self.request_redraw();
                 return true;
             }
@@ -393,81 +445,74 @@ impl<Rend: WindowRenderer> View<Rend> {
     pub fn redraw(&mut self) {
         #[cfg(target_os = "ios")]
         self.ios_request_redraw.set(false);
-        let animation_time = self.current_animation_time();
-        let is_visible = self.is_visible;
-
-        let previous = self.doc.inner().frame_time();
-        self.doc.begin_frame(FrameTime::new(
-            animation_time,
-            animation_time - previous.t,
-            previous.frame + 1,
-        ));
-
-        let mut inner = self.doc.inner_mut();
-        inner.resolve(animation_time);
-
-        // Unregister resources (e.g. textures) from dropped custom widget nodes
-        #[cfg(feature = "custom-widget")]
-        for id in inner.take_pending_resource_deallocations() {
-            self.renderer.unregister_resource(id);
-        }
-
-        let (width, height) = inner.viewport().window_size;
-        let scale = inner.viewport().scale_f64();
-        let is_animating = inner.is_animating();
-        let is_blocked = inner.has_pending_critical_resources();
+        let can_paint = self.is_visible && self.renderer.is_active();
         let insets = self.safe_area_insets;
 
+        let outcome = self.scheduler.frame(
+            &mut *self.doc,
+            &mut self.renderer,
+            can_paint,
+            |doc, renderer| {
+                let mut inner = doc.inner_mut();
+
+                // Unregister resources (e.g. textures) from dropped custom widget nodes.
+                // Deliberately only on frames that paint: the renderer may be suspended
+                // otherwise, and the pending ids wait for the next painted frame.
+                #[cfg(feature = "custom-widget")]
+                for id in inner.take_pending_resource_deallocations() {
+                    renderer.unregister_resource(id);
+                }
+
+                let (width, height) = inner.viewport().window_size;
+                let scale = inner.viewport().scale_f64();
+                renderer.render(|scene| {
+                    paint_scene(
+                        scene,
+                        &mut inner,
+                        scale,
+                        width,
+                        height,
+                        insets.left,
+                        insets.top,
+                    )
+                });
+            },
+        );
+
         // Push the accessibility tree after resolve so that it reflects the current
-        // DOM, styles, layout and focus.
-        if !is_blocked && inner.has_changes() {
+        // DOM, styles, layout and focus, whether or not the frame painted.
+        let mut inner = self.doc.inner_mut();
+        #[cfg(feature = "accessibility")]
+        let accessibility = &mut self.accessibility;
+        take_tree_changes(&mut inner, |_doc| {
             #[cfg(feature = "accessibility")]
-            self.accessibility.update_tree(&inner);
-            inner.clear_changes();
-        }
-
-        if !is_blocked && is_visible {
-            self.renderer.render(|scene| {
-                paint_scene(
-                    scene,
-                    &mut inner,
-                    scale,
-                    width,
-                    height,
-                    insets.left,
-                    insets.top,
-                )
-            });
-        }
-
+            accessibility.update_tree(_doc);
+        });
         drop(inner);
 
-        if !is_blocked && is_visible && is_animating {
+        if outcome.request_redraw {
             self.request_redraw();
+        }
+    }
+
+    /// Queues a step of `dt` seconds, then draws frames until every queued step has run.
+    ///
+    /// Each frame acknowledges its step, unpainted if the window can't paint.
+    pub fn step(&mut self, dt: f64, ack: StepAck) {
+        self.scheduler.step(dt, ack);
+        while self.scheduler.has_pending_steps() {
+            self.redraw();
         }
     }
 
     pub fn pointer_coords(&self, position: PhysicalPosition<f64>) -> PointerCoords {
         let inner = self.doc.inner();
-        let scale = inner.viewport().scale_f64();
-        let LogicalPosition::<f32> {
-            x: screen_x,
-            y: screen_y,
-        } = position.to_logical(scale);
-        let viewport_scroll_offset = inner.viewport_scroll();
-        let client_x = screen_x - (self.safe_area_insets.left as f64 / scale) as f32;
-        let client_y = screen_y - (self.safe_area_insets.top as f64 / scale) as f32;
-        let page_x = client_x + viewport_scroll_offset.x as f32;
-        let page_y = client_y + viewport_scroll_offset.y as f32;
-
-        PointerCoords {
-            screen_x,
-            screen_y,
-            client_x,
-            client_y,
-            page_x,
-            page_y,
-        }
+        pointer_coords(
+            position,
+            inner.viewport().scale_f64(),
+            self.safe_area_insets,
+            inner.viewport_scroll(),
+        )
     }
 
     pub fn window_id(&self) -> WindowId {
@@ -596,7 +641,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         self.accessibility
             .process_window_event(&*self.window, &event);
 
-        let time_stamp = self.current_animation_time();
+        let time_stamp = self.scheduler.now();
 
         match event {
             WindowEvent::Destroyed => {}
@@ -890,5 +935,40 @@ impl<Rend: WindowRenderer> View<Rend> {
             WindowEvent::DragLeft { .. } => {},
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_changes_are_taken_once() {
+        let mut doc = BaseDocument::new(blitz_dom::DocumentConfig::default());
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let name = blitz_dom::QualName::new(None, blitz_dom::ns!(html), "html".into());
+        let html = mutator.create_element(name, Vec::new());
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+
+        let mut calls = 0;
+        take_tree_changes(&mut doc, |_| calls += 1);
+        take_tree_changes(&mut doc, |_| calls += 1);
+        assert_eq!(calls, 1);
+        assert!(!doc.has_changes());
+    }
+
+    #[test]
+    fn pointer_coords_subtracts_the_insets() {
+        let coords = pointer_coords(
+            PhysicalPosition::new(120.0, 80.0),
+            2.0,
+            PhysicalInsets::new(20, 40, 0, 0),
+            blitz_dom::Point { x: 10.0, y: 5.0 },
+        );
+        assert_eq!((coords.screen_x, coords.screen_y), (60.0, 40.0));
+        assert_eq!((coords.client_x, coords.client_y), (40.0, 30.0));
+        assert_eq!((coords.page_x, coords.page_y), (50.0, 35.0));
     }
 }

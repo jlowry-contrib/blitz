@@ -68,12 +68,13 @@ pub use {
 
 use blitz_dom::StyleThreading;
 pub use blitz_dom::{FontContext, Widget, build_single_font_ctx};
+pub use blitz_shell::TimeSource;
 pub use blitz_traits::shell::{FrameTime, Presented, SafeArea, ScrollPhysics};
 pub use config::Config;
 pub use event_handlers::WinitEventHandlerId;
 pub use frame::{
-    FrameClock, TimeSource, pointer_time_stamp, request_animation_frame, touch_time_stamp,
-    use_frame_clock, use_frame_time,
+    FrameClock, pointer_time_stamp, request_animation_frame, touch_time_stamp, use_frame_clock,
+    use_frame_time,
 };
 #[cfg(feature = "vello")]
 pub use glass::GlassInputs;

@@ -4,6 +4,8 @@
 use blitz_dom::ScrollBehavior;
 use blitz_test_harness::{Harness, HarnessOptions, mouse_pointer_event};
 use blitz_traits::events::UiEvent;
+use dioxus::prelude::*;
+use std::cell::Cell;
 
 const FRAME: f64 = 1.0 / 60.0;
 
@@ -180,4 +182,28 @@ fn double_click_uses_event_stamps() {
         !slow.contains(&"dblclick".to_string()),
         "clicks 0.6 s apart shouldn't double-click: {slow:?}"
     );
+}
+
+thread_local! {
+    static STAMP: Cell<Option<f64>> = const { Cell::new(None) };
+}
+
+fn stamp_app() -> Element {
+    rsx! {
+        div {
+            id: "target",
+            style: "width:100px; height:100px;",
+            onpointerdown: move |event: PointerEvent| {
+                STAMP.set(dioxus_native::pointer_time_stamp(&event.data()));
+            },
+        }
+    }
+}
+
+#[test]
+fn pointer_data_exposes_its_stamp() {
+    let mut harness = Harness::from_component(stamp_app);
+    harness.tick(0.25);
+    harness.click("#target");
+    assert_eq!(STAMP.get(), Some(0.25));
 }
