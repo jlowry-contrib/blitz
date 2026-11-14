@@ -34,15 +34,36 @@ pub fn use_portal_target() -> RenderTargetId {
     target
 }
 
-/// Creates a render target for the `data-portal-outlet="key"` element; currently its writes are dropped.
+/// Creates a render target hosted by the element with `data-portal-outlet="<key>"`.
+///
+/// The key is read once. Until both the target and such an element exist, the target renders
+/// nothing; its writes wait and are applied when the element appears. If the element goes,
+/// the content is kept out of the document until another one with the key appears. A key that
+/// is already registered keeps its first target, and this one's writes are dropped.
+///
+/// The target is removed once its owner drops and nothing is mounted in it; the element stays.
+/// Keep every [`Portal`] for this target inside the owner's subtree, as with
+/// [`use_portal_target`], and keep the element's own children out of it, since the target is
+/// only removed once the element is empty. Outside a Dioxus Native document nothing hosts the
+/// target, so its writes are dropped.
 pub fn use_portal_outlet(key: &str) -> RenderTargetId {
-    let _ = key;
     // A weak handle, because the runtime owns this cleanup closure.
     let runtime = Rc::downgrade(&Runtime::current());
-    use_hook_with_cleanup(
-        || Runtime::current().create_render_target(),
-        move |target| remove_unhosted(&runtime, target),
-    )
+    let (target, _) = use_hook_with_cleanup(
+        || {
+            let target = Runtime::current().create_render_target();
+            let hosts = try_consume_context::<PortalHosts>();
+            if let Some(hosts) = &hosts {
+                hosts.request_outlet(key, target);
+            }
+            (target, hosts)
+        },
+        move |(target, hosts)| match hosts {
+            Some(hosts) => hosts.request_removal(target),
+            None => remove_unhosted(&runtime, target),
+        },
+    );
+    target
 }
 
 /// Removes a target no document hosts.

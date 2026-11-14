@@ -1,14 +1,22 @@
-//! Dioxus portals render into overlay hosts appended to `<body>` after `<main>`.
+//! Dioxus portals render into overlay hosts appended to `<body>` after `<main>`, or into
+//! outlets bound by key.
 
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use blitz_dom::{BaseDocument, Node, NodeData, NodeId};
+use anyrender::Scene;
+use anyrender::recording::RenderCommand;
+use blitz_dom::{BaseDocument, DocumentConfig, Node, NodeData, NodeId};
+use blitz_html::HtmlProvider;
+use blitz_paint::paint_scene;
 use blitz_test_harness::{Harness, HarnessOptions};
+use blitz_tests::register_glass_properties;
+use blitz_traits::shell::{ColorScheme, Viewport};
 use dioxus::prelude::*;
 use dioxus_core::{Runtime, ScopeId};
-use dioxus_native::{Portal, RenderTargetId, use_portal_target};
+use dioxus_native::{Portal, RenderTargetId, use_portal_outlet, use_portal_target};
 use dioxus_native_dom::DioxusDocument;
 
 /// Writes `node`'s subtree, one node per line, with node ids and attributes in order.
@@ -121,25 +129,43 @@ fn portal_children_render_in_the_overlay_host() {
     assert_eq!(mounted.get(), 1, "the portal's mounted event fires once");
 }
 
+/// Two counters a test's components share: one for ROOT's handlers, one for the portal's.
+#[derive(Clone, Default)]
+struct Counts {
+    root: Rc<Cell<usize>>,
+    portal: Rc<Cell<usize>>,
+}
+
+impl Counts {
+    fn get(&self) -> (usize, usize) {
+        (self.root.get(), self.portal.get())
+    }
+}
+
+fn bump(count: &Rc<Cell<usize>>) {
+    count.set(count.get() + 1);
+}
+
+fn with_counts(app: fn() -> Element, counts: &Counts) -> Harness<DioxusDocument> {
+    let vdom = VirtualDom::new(app).with_root_context(counts.clone());
+    Harness::from_vdom(vdom, HarnessOptions::default())
+}
+
 #[test]
 fn portal_clicks_never_reach_root_handlers() {
     fn app() -> Element {
         let target = use_portal_target();
-        let root_clicks = consume_context::<Rc<Cell<usize>>>();
+        let Counts { root, portal } = consume_context::<Counts>();
         rsx! {
-            button {
-                id: "root",
-                onclick: move |_| root_clicks.set(root_clicks.get() + 1),
-                "root"
-            }
+            button { id: "root", onclick: move |_| bump(&root), "root" }
             Portal { target,
-                button { id: "portal", onclick: move |_| {}, "portal" }
+                button { id: "portal", onclick: move |_| bump(&portal), "portal" }
             }
         }
     }
 
-    let root_clicks = Rc::new(Cell::new(0));
-    let mut harness = with_stage(app, &root_clicks);
+    let counts = Counts::default();
+    let mut harness = with_counts(app, &counts);
     // Each target numbers its elements from its own arena, so both buttons carry the same id.
     assert_eq!(
         harness.attr("#root", "data-dioxus-id"),
@@ -147,36 +173,36 @@ fn portal_clicks_never_reach_root_handlers() {
     );
 
     harness.click("#portal");
-    assert_eq!(root_clicks.get(), 0);
+    assert_eq!(counts.get(), (0, 1));
     harness.click("#root");
-    assert_eq!(root_clicks.get(), 1);
+    assert_eq!(counts.get(), (1, 1));
 }
 
 #[test]
 fn portal_mouseenter_never_reaches_root_handlers() {
     fn app() -> Element {
         let target = use_portal_target();
-        let root_enters = consume_context::<Rc<Cell<usize>>>();
+        let Counts { root, portal } = consume_context::<Counts>();
         rsx! {
             div {
                 id: "root",
                 style: "height: 50px",
-                onmouseenter: move |_| root_enters.set(root_enters.get() + 1),
+                onmouseenter: move |_| bump(&root),
                 "root"
             }
             Portal { target,
                 div {
                     id: "portal",
                     style: "height: 50px",
-                    onmouseenter: move |_| {},
+                    onmouseenter: move |_| bump(&portal),
                     "portal"
                 }
             }
         }
     }
 
-    let root_enters = Rc::new(Cell::new(0));
-    let mut harness = with_stage(app, &root_enters);
+    let counts = Counts::default();
+    let mut harness = with_counts(app, &counts);
     // Each target numbers its elements from its own arena, so both elements carry the same id.
     assert_eq!(
         harness.attr("#root", "data-dioxus-id"),
@@ -186,10 +212,10 @@ fn portal_mouseenter_never_reaches_root_handlers() {
     // `mouseenter` doesn't bubble, so its chain holds only the entered element.
     let (x, y) = harness.center_of("#portal");
     harness.move_mouse_to(x, y);
-    assert_eq!(root_enters.get(), 0);
+    assert_eq!(counts.get(), (0, 1));
     let (x, y) = harness.center_of("#root");
     harness.move_mouse_to(x, y);
-    assert_eq!(root_enters.get(), 1);
+    assert_eq!(counts.get(), (1, 1));
 }
 
 #[test]
@@ -469,3 +495,390 @@ NodeId(1v1) #other
           NodeId(15v3) "stage 1"
         NodeId(9v1) <input type="checkbox" checked="true">
 "#;
+
+/// The viewport's size in CSS px for the tests that record a scene.
+const VIEW: u32 = 300;
+
+/// Builds `app` at scale 1 with the glass properties registered before the first render.
+fn scene_harness(app: fn() -> Element) -> Harness<DioxusDocument> {
+    let config = DocumentConfig {
+        viewport: Some(Viewport::new(VIEW, VIEW, 1.0, ColorScheme::Light)),
+        html_parser_provider: Some(Arc::new(HtmlProvider) as _),
+        ..Default::default()
+    };
+    let mut doc = DioxusDocument::new(VirtualDom::new(app), config);
+    register_glass_properties(&mut doc.inner.borrow_mut());
+    doc.initial_build();
+    let mut harness = Harness::wrap(doc);
+    harness.pump();
+    harness
+}
+
+fn record(harness: &Harness<DioxusDocument>) -> Scene {
+    let mut scene = Scene::new();
+    let mut doc = harness.doc.inner.borrow_mut();
+    paint_scene(&mut scene, &mut doc, 1.0, VIEW, VIEW, 0, 0);
+    scene
+}
+
+/// The scene's commands, with each glass group's id, which comes from a `NodeId`, replaced by
+/// the order the group first appears in.
+fn commands_without_node_ids(scene: &Scene) -> Vec<RenderCommand> {
+    let mut ids = Vec::new();
+    scene
+        .commands
+        .iter()
+        .cloned()
+        .map(|mut command| {
+            if let RenderCommand::Glass(group) = &mut command {
+                let group = Arc::make_mut(group);
+                group.id = group.id.map(|id| {
+                    let order = ids.iter().position(|seen| *seen == id).unwrap_or_else(|| {
+                        ids.push(id);
+                        ids.len() - 1
+                    });
+                    order as u64
+                });
+            }
+            command
+        })
+        .collect()
+}
+
+/// The translation of the first solid fill of `rgb`.
+fn fill_translation(scene: &Scene, rgb: [f32; 3]) -> kurbo::Vec2 {
+    scene
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            RenderCommand::Fill(fill)
+                if matches!(
+                    &fill.brush,
+                    anyrender::Paint::Solid(color) if color.components[..3] == rgb[..]
+                ) =>
+            {
+                Some(fill.transform.translation())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no fill of {rgb:?}"))
+}
+
+const PAGE_STYLE: &str = "position: absolute; left: 0px; top: 0px; width: 300px; \
+     height: 300px; background: rgb(0, 255, 0)";
+const OUTLET_STYLE: &str = "position: absolute; left: 20px; top: 30px; width: 200px; \
+     height: 120px; background: rgb(0, 0, 255); --glass-container: 10px";
+const LENS_STYLE: &str = "position: absolute; left: 10px; top: 10px; width: 60px; \
+     height: 40px; border-radius: 20px; --glass: regular; background: rgba(255, 0, 0, 0.5)";
+const BUTTON_STYLE: &str = "position: absolute; left: 80px; top: 10px; width: 60px; \
+     height: 40px; --glass: clear; --glass-interactive: 1";
+
+#[test]
+fn portal_into_an_outlet_records_the_same_commands_as_inline() {
+    fn inline() -> Element {
+        rsx! {
+            div { id: "page", style: PAGE_STYLE }
+            div { id: "outlet", style: OUTLET_STYLE,
+                div { id: "lens", style: LENS_STYLE }
+                div { id: "button", style: BUTTON_STYLE }
+            }
+        }
+    }
+
+    fn through_a_portal() -> Element {
+        let target = use_portal_outlet("sheet");
+        rsx! {
+            div { id: "page", style: PAGE_STYLE }
+            div { id: "outlet", "data-portal-outlet": "sheet", style: OUTLET_STYLE }
+            Portal { target,
+                div { id: "lens", style: LENS_STYLE }
+                div { id: "button", style: BUTTON_STYLE }
+            }
+        }
+    }
+
+    let inline = scene_harness(inline);
+    let portal = scene_harness(through_a_portal);
+    assert_eq!(
+        parent(&portal, node_id(&portal, "#lens")),
+        Some(node_id(&portal, "#outlet"))
+    );
+
+    let inline = commands_without_node_ids(&record(&inline));
+    let portal = commands_without_node_ids(&record(&portal));
+    assert!(
+        inline
+            .iter()
+            .any(|command| matches!(command, RenderCommand::Glass(_))),
+        "the scene has glass: {inline:#?}"
+    );
+    assert_eq!(inline, portal);
+}
+
+#[test]
+fn click_in_a_portal_reaches_its_logical_handler() {
+    #[derive(Clone, Default)]
+    struct Clicks {
+        outlet: Rc<Cell<usize>>,
+        logical: Rc<Cell<usize>>,
+        twin: Rc<Cell<usize>>,
+        portal: Rc<Cell<usize>>,
+    }
+
+    impl Clicks {
+        fn get(&self) -> [usize; 4] {
+            [&self.outlet, &self.logical, &self.twin, &self.portal].map(|count| count.get())
+        }
+    }
+
+    fn app() -> Element {
+        let target = use_portal_outlet("sheet");
+        let Clicks {
+            outlet,
+            logical,
+            twin,
+            portal,
+        } = consume_context::<Clicks>();
+        rsx! {
+            div {
+                id: "outlet",
+                "data-portal-outlet": "sheet",
+                style: "padding: 20px",
+                onclick: move |_| bump(&outlet),
+            }
+            div { id: "logical", onclick: move |_| bump(&logical),
+                button { id: "twin", onclick: move |_| bump(&twin), "twin" }
+                Portal { target,
+                    button { id: "portal", onclick: move |_| bump(&portal), "portal" }
+                }
+            }
+        }
+    }
+
+    let clicks = Clicks::default();
+    let vdom = VirtualDom::new(app).with_root_context(clicks.clone());
+    let mut harness = Harness::from_vdom(vdom, HarnessOptions::default());
+    assert_eq!(
+        parent(&harness, node_id(&harness, "#portal")),
+        Some(node_id(&harness, "#outlet"))
+    );
+
+    // The click bubbles through the portal's logical parents, not the outlet it sits in.
+    harness.click("#portal");
+    assert_eq!(clicks.get(), [0, 1, 0, 1]);
+
+    // The outlet's own padding belongs to ROOT.
+    let outlet = harness.layout_rect("#outlet");
+    harness.click_at(outlet.x as f32 + 5.0, outlet.y as f32 + 5.0);
+    assert_eq!(clicks.get(), [1, 1, 0, 1]);
+
+    harness.click("#twin");
+    assert_eq!(clicks.get(), [1, 2, 1, 1]);
+}
+
+#[test]
+fn mounted_events_fire_per_target() {
+    #[derive(Clone, Default)]
+    struct Log(Rc<std::cell::RefCell<Vec<&'static str>>>);
+
+    fn app() -> Element {
+        let overlay = use_portal_target();
+        let outlet = use_portal_outlet("sheet");
+        let log = consume_context::<Log>();
+        let mount = move |name: &'static str| {
+            let log = log.clone();
+            move |_: MountedEvent| log.0.borrow_mut().push(name)
+        };
+        rsx! {
+            div { id: "root", onmounted: mount("root") }
+            div { id: "outlet", "data-portal-outlet": "sheet" }
+            Portal { target: overlay,
+                div { id: "overlay", onmounted: mount("overlay") }
+            }
+            Portal { target: outlet,
+                div { id: "sheet", onmounted: mount("outlet") }
+            }
+        }
+    }
+
+    let log = Log::default();
+    let vdom = VirtualDom::new(app).with_root_context(log.clone());
+    let harness = Harness::from_vdom(vdom, HarnessOptions::default());
+    assert_eq!(
+        parent(&harness, node_id(&harness, "#sheet")),
+        Some(node_id(&harness, "#outlet"))
+    );
+    let mut fired = log.0.borrow().clone();
+    fired.sort_unstable();
+    assert_eq!(fired, ["outlet", "overlay", "root"]);
+}
+
+#[test]
+fn fixed_child_of_an_overlay_host_does_not_scroll() {
+    const PAGE: [f32; 3] = [0.0, 1.0, 0.0];
+    const BAR: [f32; 3] = [0.0, 0.0, 1.0];
+
+    fn app() -> Element {
+        let target = use_portal_target();
+        rsx! {
+            div { id: "page", style: "height: 2000px; background: rgb(0, 255, 0)" }
+            Portal { target,
+                div {
+                    id: "bar",
+                    style: "position: fixed; left: 0px; bottom: 0px; width: 100px; \
+                            height: 40px; background: rgb(0, 0, 255)",
+                }
+            }
+        }
+    }
+
+    let mut harness = scene_harness(app);
+    let bar = node_id(&harness, "#bar");
+    let before = record(&harness);
+    assert_eq!(harness.hit_node(50.0, VIEW as f32 - 20.0), bar);
+
+    // A negative delta scrolls the page down, as a wheel does.
+    harness.base_mut().scroll_viewport_by(0.0, -300.0);
+    harness.pump();
+    assert_eq!(harness.base().viewport_scroll().y, 300.0);
+    let after = record(&harness);
+
+    assert_eq!(
+        fill_translation(&after, PAGE) - fill_translation(&before, PAGE),
+        kurbo::Vec2::new(0.0, -300.0),
+        "the page scrolls"
+    );
+    assert_eq!(
+        fill_translation(&after, BAR),
+        fill_translation(&before, BAR)
+    );
+    assert_eq!(harness.hit_node(50.0, VIEW as f32 - 20.0), bar);
+}
+
+#[test]
+fn outlet_appearing_after_the_portal_still_renders() {
+    #[component]
+    fn Sheet(stage: usize) -> Element {
+        let target = use_portal_outlet("sheet");
+        rsx! {
+            Portal { target,
+                div { id: "sheet", "sheet {stage}" }
+            }
+        }
+    }
+
+    fn app() -> Element {
+        let stage = stage();
+        rsx! {
+            if matches!(stage, 1 | 3 | 5) {
+                div { id: "outlet", "data-portal-outlet": "sheet" }
+            }
+            if stage < 4 {
+                Sheet { stage }
+            }
+        }
+    }
+
+    let stage = Rc::new(Cell::new(0));
+    let mut harness = with_stage(app, &stage);
+    let main = node_id(&harness, "#main");
+    assert_eq!(harness.query("#sheet"), None, "no outlet yet");
+    assert_eq!(children(&harness, body(&harness)), vec![main]);
+
+    // The outlet appears, then goes and comes back while the sheet keeps rendering.
+    for next in [1, 2, 3] {
+        stage.set(next);
+        rerender(&mut harness);
+        if next == 2 {
+            assert_eq!(harness.query("#outlet"), None);
+            assert_eq!(harness.query("#sheet"), None);
+        } else {
+            let outlet = node_id(&harness, "#outlet");
+            assert_eq!(harness.query_all("#sheet").len(), 1);
+            assert_eq!(parent(&harness, node_id(&harness, "#sheet")), Some(outlet));
+            assert_eq!(harness.text_content("#sheet"), format!("sheet {next}"));
+        }
+        assert_eq!(children(&harness, body(&harness)), vec![main]);
+    }
+
+    // The sheet's owner drops while the outlet is gone, then the outlet comes back empty.
+    for next in [2, 4, 5] {
+        stage.set(next);
+        rerender(&mut harness);
+        assert_eq!(harness.query("#sheet"), None);
+    }
+    assert_eq!(children(&harness, node_id(&harness, "#outlet")), vec![]);
+}
+
+#[test]
+fn outlet_waits_for_its_key_and_outlives_it() {
+    #[component]
+    fn Sheet() -> Element {
+        let target = use_portal_outlet("sheet");
+        rsx! {
+            Portal { target,
+                div { id: "sheet", "sheet" }
+            }
+        }
+    }
+
+    fn app() -> Element {
+        rsx! {
+            div { id: "outlet", "data-portal-outlet": "sheet" }
+            if stage() == 1 {
+                Sheet {}
+            }
+        }
+    }
+
+    let stage = Rc::new(Cell::new(0));
+    let mut harness = with_stage(app, &stage);
+    let outlet = node_id(&harness, "#outlet");
+    assert_eq!(children(&harness, outlet), vec![]);
+
+    stage.set(1);
+    rerender(&mut harness);
+    assert_eq!(parent(&harness, node_id(&harness, "#sheet")), Some(outlet));
+
+    // Unregistering the key leaves the outlet element in place.
+    stage.set(2);
+    rerender(&mut harness);
+    assert_eq!(harness.query("#sheet"), None);
+    assert_eq!(node_id(&harness, "#outlet"), outlet);
+    assert_eq!(children(&harness, outlet), vec![]);
+
+    stage.set(1);
+    rerender(&mut harness);
+    assert_eq!(parent(&harness, node_id(&harness, "#sheet")), Some(outlet));
+}
+
+#[test]
+fn outlet_content_follows_the_key_between_elements() {
+    fn app() -> Element {
+        let target = use_portal_outlet("sheet");
+        let stage = stage();
+        let key = |element: usize| (stage == element).then_some("sheet");
+        rsx! {
+            div { id: "first", "data-portal-outlet": key(1) }
+            div { id: "second", "data-portal-outlet": key(2) }
+            Portal { target,
+                div { id: "sheet", "sheet {stage}" }
+            }
+        }
+    }
+
+    let stage = Rc::new(Cell::new(1));
+    let mut harness = with_stage(app, &stage);
+    for (next, element) in [(2, Some("#second")), (0, None), (1, Some("#first"))] {
+        stage.set(next);
+        rerender(&mut harness);
+        match element {
+            Some(element) => {
+                let element = node_id(&harness, element);
+                assert_eq!(parent(&harness, node_id(&harness, "#sheet")), Some(element));
+                assert_eq!(harness.text_content("#sheet"), format!("sheet {next}"));
+            }
+            None => assert_eq!(harness.query("#sheet"), None),
+        }
+    }
+}

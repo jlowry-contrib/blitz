@@ -194,6 +194,9 @@ impl DioxusDocument {
         for target in self.vdom_state.portal_hosts().take_overlays() {
             self.register_overlay_target(target);
         }
+        for (key, target) in self.vdom_state.portal_hosts().take_outlets() {
+            self.vdom_state.register_outlet(key, target);
+        }
         self.vdom_state
             .apply_buffered_mutations(&mut self.inner.borrow_mut());
         self.flush_queued_mounted_events();
@@ -253,14 +256,15 @@ impl DioxusDocument {
 
     /// Removes `target`'s host from the document; later writes to `target` are dropped.
     ///
-    /// The target stays in the VirtualDom, and the root target is never removed.
+    /// An outlet's element stays, with its key unregistered. The target stays in the
+    /// VirtualDom, and the root target is never removed.
     pub fn remove_target(&mut self, target: RenderTargetId) {
         if target == RenderTargetId::ROOT {
             return;
         }
         self.pending_removals.retain(|pending| *pending != target);
-        if let Some(host) = self.vdom_state.remove_target(target) {
-            let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.borrow_mut();
+        if let Some(host) = self.vdom_state.remove_target(&inner, target) {
             // The host may already have been dropped along with an ancestor.
             if inner.get_node(host).is_some() {
                 inner.mutate().remove_and_drop_node(host);
@@ -495,28 +499,29 @@ impl EventHandler for DioxusEventHandler<'_> {
             return;
         };
 
-        // Get dioxus vdom id for node
-        let dioxus_id = chain.iter().enumerate().find_map(|(index, node_id)| {
-            let id = doc.inner().get_node(*node_id).and_then(get_dioxus_id)?;
-            Some((index, id))
-        });
-        let Some((index, id)) = dioxus_id else {
+        // The event's node is content of one render target. Its id is the nearest one in that
+        // target's content, since the DOM ancestors past the target's host aren't its logical
+        // parents. The target comes from the DOM ancestors, as a non-bubbling event's chain
+        // holds only its node.
+        let Some(&event_node) = chain.first() else {
+            return;
+        };
+        let target = self.vdom_state.target_of_node(&doc.inner(), event_node);
+        let host = self.vdom_state.host(target);
+        let dioxus_id = chain
+            .iter()
+            .take_while(|node_id| Some(**node_id) != host)
+            .find_map(|node_id| doc.inner().get_node(*node_id).and_then(get_dioxus_id));
+        let Some(id) = dioxus_id else {
             return;
         };
 
-        // An element inside a portal is numbered in its target's own arena, so its id means
-        // nothing to ROOT. Such events aren't dispatched to the VirtualDom yet. The target comes
-        // from the DOM ancestors, since a non-bubbling event's chain holds only its target.
-        let target = self.vdom_state.target_of_node(&doc.inner(), chain[index]);
-        if target != RenderTargetId::ROOT {
-            return;
-        }
-
-        // Handle event in vdom
+        // Handle event in vdom. Ids are numbered per target, so the target's own arena resolves
+        // the id, and the VirtualDom bubbles the event through the logical tree from there.
         let dx_event = Event::new(event_data.clone(), event.bubbles);
         self.vdom
             .runtime()
-            .handle_event(event.name(), dx_event.clone(), id);
+            .handle_event_for_target(target, event.name(), dx_event.clone(), id);
 
         // Update event state
         if !dx_event.default_action_enabled() {
