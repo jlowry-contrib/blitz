@@ -9108,7 +9108,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "vello"
 version = "0.11.0"
-source = "git+https://github.com/jlowry-contrib/vello?rev=555611aaf85785dd24cf5beafcd9f09f94addf7e#555611aaf85785dd24cf5beafcd9f09f94addf7e"
+source = "git+https://github.com/jlowry-contrib/vello?rev=0888e8050ebc398458d9b4564b84055dfaf9b051#0888e8050ebc398458d9b4564b84055dfaf9b051"
 dependencies = [
  "bytemuck",
  "futures-intrusive",
@@ -9157,7 +9157,7 @@ dependencies = [
 [[package]]
 name = "vello_encoding"
 version = "0.11.0"
-source = "git+https://github.com/jlowry-contrib/vello?rev=555611aaf85785dd24cf5beafcd9f09f94addf7e#555611aaf85785dd24cf5beafcd9f09f94addf7e"
+source = "git+https://github.com/jlowry-contrib/vello?rev=0888e8050ebc398458d9b4564b84055dfaf9b051#0888e8050ebc398458d9b4564b84055dfaf9b051"
 dependencies = [
  "bytemuck",
  "guillotiere",
@@ -9198,7 +9198,7 @@ dependencies = [
 [[package]]
 name = "vello_shaders"
 version = "0.11.0"
-source = "git+https://github.com/jlowry-contrib/vello?rev=555611aaf85785dd24cf5beafcd9f09f94addf7e#555611aaf85785dd24cf5beafcd9f09f94addf7e"
+source = "git+https://github.com/jlowry-contrib/vello?rev=0888e8050ebc398458d9b4564b84055dfaf9b051#0888e8050ebc398458d9b4564b84055dfaf9b051"
 dependencies = [
  "bytemuck",
  "log",
