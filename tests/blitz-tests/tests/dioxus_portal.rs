@@ -884,6 +884,37 @@ fn outlet_content_follows_the_key_between_elements() {
 }
 
 #[test]
+fn outlet_never_binds_inside_its_own_content() {
+    fn app() -> Element {
+        let target = use_portal_outlet("sheet");
+        let moved = stage() == 1;
+        rsx! {
+            div { id: "first", "data-portal-outlet": (!moved).then_some("sheet") }
+            div { id: "second", "data-portal-outlet": moved.then_some("sheet") }
+            Portal { target,
+                div { id: "sheet",
+                    // Comes before #second in tree order while the sheet sits in #first.
+                    div { id: "inner", "data-portal-outlet": moved.then_some("sheet") }
+                }
+            }
+        }
+    }
+
+    let stage = Rc::new(Cell::new(0));
+    let mut harness = with_stage(app, &stage);
+    assert_eq!(
+        parent(&harness, node_id(&harness, "#sheet")),
+        Some(node_id(&harness, "#first"))
+    );
+    stage.set(1);
+    rerender(&mut harness);
+    assert_eq!(
+        parent(&harness, node_id(&harness, "#sheet")),
+        Some(node_id(&harness, "#second"))
+    );
+}
+
+#[test]
 fn swapping_the_owner_in_one_render_hands_the_key_over() {
     fn page(name: &'static str) -> Element {
         let target = use_portal_outlet("sheet");

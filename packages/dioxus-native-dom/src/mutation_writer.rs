@@ -618,7 +618,8 @@ impl DioxusState {
     }
 
     /// Hosts each outlet target in the first element, in tree order, whose
-    /// `data-portal-outlet` names its key, moving its content when that element changes.
+    /// `data-portal-outlet` names its key and that isn't inside the target's own content,
+    /// moving its content when that element changes.
     ///
     /// A target whose element has left the document keeps its old host, detached, until another
     /// one appears. Returns whether a target got its first host, which leaves buffered writes
@@ -633,7 +634,15 @@ impl DioxusState {
             let Some(state) = self.targets.get_mut(target) else {
                 continue;
             };
-            let element = elements.get(key.as_str()).copied();
+            // An element inside the content would become its own ancestor once the content moves.
+            let element = elements.get(key.as_str()).and_then(|candidates| {
+                candidates.iter().copied().find(|element| {
+                    state
+                        .stack
+                        .as_ref()
+                        .is_none_or(|stack| !lies_in_content(doc, stack, *element))
+                })
+            });
             match (state.stack.as_mut(), element) {
                 (None, Some(element)) => {
                     state.stack = Some(StackState::new(element));
@@ -765,8 +774,23 @@ fn owned_in_order(doc: &BaseDocument, stack: &StackState<NodeId>) -> Vec<NodeId>
         .unwrap_or_default()
 }
 
-/// The first element in tree order for each `data-portal-outlet` key in `doc`.
-fn outlet_elements(doc: &BaseDocument) -> BTreeMap<String, NodeId> {
+/// Whether `node` is, or lies inside, a node `stack` placed under its root.
+fn lies_in_content(doc: &BaseDocument, stack: &StackState<NodeId>, node: NodeId) -> bool {
+    let mut current = Some(node);
+    while let Some(node) = current {
+        if node == stack.root {
+            return false;
+        }
+        if stack.owns(node) {
+            return true;
+        }
+        current = doc.get_node(node).and_then(|node| node.parent);
+    }
+    false
+}
+
+/// The elements in tree order for each `data-portal-outlet` key in `doc`.
+fn outlet_elements(doc: &BaseDocument) -> BTreeMap<String, Vec<NodeId>> {
     let name = qual_name("data-portal-outlet", None);
     let mut elements = BTreeMap::new();
     let mut pending = vec![doc.root_node().id];
@@ -775,7 +799,10 @@ fn outlet_elements(doc: &BaseDocument) -> BTreeMap<String, NodeId> {
             continue;
         };
         if let Some(key) = node.attr(name.local.clone()) {
-            elements.entry(key.to_owned()).or_insert(id);
+            elements
+                .entry(key.to_owned())
+                .or_insert_with(Vec::new)
+                .push(id);
         }
         // Pushed in reverse, so children are visited in tree order.
         pending.extend(node.children.iter().rev().copied());
