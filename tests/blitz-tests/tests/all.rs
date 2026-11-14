@@ -69,6 +69,7 @@ mod pre_overflow_scroll;
 mod pseudo_element_flow_classification;
 mod pseudo_element_update;
 mod rem_after_viewport_change;
+mod remounted_image;
 mod render_blocking_stylesheet;
 mod resize_restyle;
 mod rotate_z_axis;
