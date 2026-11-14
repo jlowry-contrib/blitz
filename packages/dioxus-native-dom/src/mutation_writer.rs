@@ -49,14 +49,32 @@ pub(crate) trait RealDom {
     /// Whether `node` still exists.
     fn is_live(&self, node: Self::NodeId) -> bool;
 
-    /// Whether `node` is a proper descendant of `ancestor`.
-    fn is_descendant(&self, ancestor: Self::NodeId, node: Self::NodeId) -> bool;
+    /// The parent of `node`, if it has one.
+    fn parent(&self, node: Self::NodeId) -> Option<Self::NodeId>;
 }
 
 #[derive(Clone, Copy, Debug)]
 struct StackEntry<N> {
     node: N,
     element_id: Option<ElementId>,
+    /// The id this entry stands in for: one with no node in this target, which only an
+    /// insertion may use, as its root
+    stand_in: Option<ElementId>,
+}
+
+impl<N> StackEntry<N> {
+    /// The entry, which must not be a stand-in.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry stands in for an id with no node, as `push_id` would have for any
+    /// other target.
+    fn real(self) -> Self {
+        if let Some(id) = self.stand_in {
+            panic!("renderer asked for unknown ElementId {}", id.raw());
+        }
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -86,6 +104,7 @@ impl<N: Copy + PartialEq> StackState<N> {
             stack: vec![StackEntry {
                 node: root,
                 element_id: Some(ElementId::ROOT),
+                stand_in: None,
             }],
             element_to_node: vec![Some(root)],
             owned: None,
@@ -156,8 +175,21 @@ impl<N: Copy + PartialEq> StackState<N> {
         }
     }
 
+    /// Pushes the root in place of `id`, which names no node in this target.
+    fn push_stand_in(&mut self, id: ElementId) {
+        self.stack.push(StackEntry {
+            node: self.root,
+            element_id: None,
+            stand_in: Some(id),
+        });
+    }
+
     fn push(&mut self, node: N, element_id: Option<ElementId>) {
-        self.stack.push(StackEntry { node, element_id });
+        self.stack.push(StackEntry {
+            node,
+            element_id,
+            stand_in: None,
+        });
     }
 
     fn pop_entry(&mut self) -> StackEntry<N> {
@@ -178,6 +210,7 @@ impl<N: Copy + PartialEq> StackState<N> {
             .expect("renderer stack unexpectedly empty") = StackEntry {
             node,
             element_id: None,
+            stand_in: None,
         };
     }
 
@@ -204,13 +237,33 @@ where
         Self { state, backend }
     }
 
-    /// Appends `nodes` to a portal target's root when `anchor` isn't one of its nodes, as with
-    /// the stand-in `push_id` pushes for an anchor from another target. Returns whether it did.
-    fn append_for_foreign_anchor(&mut self, anchor: R::NodeId, nodes: &[R::NodeId]) -> bool {
-        let root = self.state.root;
-        if self.state.owned.is_none() || self.backend.is_descendant(root, anchor) {
+    /// Whether `node` is this stack's content: a node it placed under its root, or inside one.
+    fn is_content(&self, node: R::NodeId) -> bool {
+        let mut current = Some(node);
+        while let Some(node) = current {
+            if node == self.state.root {
+                return false;
+            }
+            if self.state.owns(node) {
+                return true;
+            }
+            current = self.backend.parent(node);
+        }
+        false
+    }
+
+    /// Appends `nodes` to a portal target's root when `anchor` is a stand-in, or otherwise not
+    /// the target's content, as an anchor from another target is. Returns whether it did.
+    fn append_for_foreign_anchor(
+        &mut self,
+        anchor: StackEntry<R::NodeId>,
+        nodes: &[R::NodeId],
+    ) -> bool {
+        if self.state.owned.is_none() || (anchor.stand_in.is_none() && self.is_content(anchor.node))
+        {
             return false;
         }
+        let root = self.state.root;
         self.backend.append_children(root, nodes);
         self.state.own(nodes);
         true
@@ -224,15 +277,14 @@ where
     fn push_id(&mut self, id: ElementId) {
         // dioxus-core anchors the content of a portal whose whole output was empty on a node of
         // the target that holds the `Portal`, whose id means nothing here. A portal target
-        // stands its root in for such an anchor, and the content goes into the host.
+        // pushes a stand-in, which only an insertion accepts, putting the content in the host.
         if self.state.owned.is_some()
             && !self
                 .state
                 .element_to_node(id)
                 .is_some_and(|node| self.backend.is_live(node))
         {
-            let root = self.state.root;
-            self.state.push(root, None);
+            self.state.push_stand_in(id);
             return;
         }
         let node = self.state.lookup(id);
@@ -240,12 +292,12 @@ where
     }
 
     fn set_id(&mut self, id: ElementId) {
-        let node = self.state.top().node;
+        let node = self.state.top().real().node;
         self.state.set_mapping(id, node);
     }
 
     fn child(&mut self, index: usize) {
-        let parent = self.state.top().node;
+        let parent = self.state.top().real().node;
         let child = self.backend.nth_child(parent, index);
         self.state.replace_top(child);
     }
@@ -265,7 +317,7 @@ where
     }
 
     fn clone(&mut self) {
-        let node = self.state.top().node;
+        let node = self.state.top().real().node;
         let cloned = self.backend.deep_clone(node);
         self.state.replace_top(cloned);
     }
@@ -281,7 +333,7 @@ where
 
     fn replace_with(&mut self, m: usize) {
         let replacements = self.state.pop_nodes(m);
-        let target = self.state.pop_entry();
+        let target = self.state.pop_entry().real();
         self.backend.replace(target.node, &replacements);
         if self.state.owns(target.node) {
             self.state.disown(target.node);
@@ -292,10 +344,11 @@ where
 
     fn insert_after(&mut self, m: usize) {
         let nodes = self.state.pop_nodes(m);
-        let anchor = self.state.top().node;
-        if self.append_for_foreign_anchor(anchor, &nodes) {
+        let entry = self.state.top();
+        if self.append_for_foreign_anchor(entry, &nodes) {
             return;
         }
+        let anchor = entry.node;
         self.backend.insert_after(anchor, &nodes);
         if self.state.owns(anchor) {
             self.state.own(&nodes);
@@ -304,10 +357,11 @@ where
 
     fn insert_before(&mut self, m: usize) {
         let nodes = self.state.pop_nodes(m);
-        let anchor = self.state.top().node;
-        if self.append_for_foreign_anchor(anchor, &nodes) {
+        let entry = self.state.top();
+        if self.append_for_foreign_anchor(entry, &nodes) {
             return;
         }
+        let anchor = entry.node;
         self.backend.insert_before(anchor, &nodes);
         if self.state.owns(anchor) {
             self.state.own(&nodes);
@@ -315,17 +369,17 @@ where
     }
 
     fn set_attribute(&mut self, name: &str, ns: Option<&str>, value: BorrowedAttributeValue<'_>) {
-        let node = self.state.top().node;
+        let node = self.state.top().real().node;
         self.backend.set_attribute(node, name, ns, value);
     }
 
     fn set_text(&mut self, value: &str) {
-        let node = self.state.top().node;
+        let node = self.state.top().real().node;
         self.backend.set_text(node, value);
     }
 
     fn add_event_listener(&mut self, name: &str) {
-        let entry = self.state.top();
+        let entry = self.state.top().real();
         let element_id = entry
             .element_id
             .expect("event listener target must be mapped to an ElementId");
@@ -334,7 +388,7 @@ where
     }
 
     fn remove_event_listener(&mut self, name: &str) {
-        let entry = self.state.top();
+        let entry = self.state.top().real();
         let element_id = entry
             .element_id
             .expect("event listener target must be mapped to an ElementId");
@@ -343,7 +397,7 @@ where
     }
 
     fn remove(&mut self) {
-        let entry = self.state.pop_entry();
+        let entry = self.state.pop_entry().real();
         self.backend.remove(entry.node);
         self.state.disown(entry.node);
         self.state.clear_mapping(entry);
@@ -895,16 +949,8 @@ impl RealDom for BlitzBackend<'_> {
         self.docm.doc.get_node(node).is_some()
     }
 
-    fn is_descendant(&self, ancestor: NodeId, node: NodeId) -> bool {
-        let parent = |node: NodeId| self.docm.doc.get_node(node).and_then(|node| node.parent);
-        let mut current = parent(node);
-        while let Some(id) = current {
-            if id == ancestor {
-                return true;
-            }
-            current = parent(id);
-        }
-        false
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.docm.doc.get_node(node).and_then(|node| node.parent)
     }
 }
 
@@ -1171,5 +1217,110 @@ mod tests {
             assert_eq!(attr(&doc, "#input", "disabled").as_deref(), expected);
             assert_eq!(attr(&doc, "#input", "checked").as_deref(), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod stand_in_tests {
+    use super::{RealDom, StackState, StackWriter};
+    use dioxus_core::{BorrowedAttributeValue, ElementId, WriteMutations as _};
+
+    /// A tree of numbered nodes that records appends; node 0 is the root.
+    #[derive(Default)]
+    struct Recorder {
+        created: usize,
+        appended: Vec<(usize, Vec<usize>)>,
+    }
+
+    impl RealDom for &mut Recorder {
+        type NodeId = usize;
+
+        fn create_element(&mut self, _: &str, _: Option<&str>) -> usize {
+            self.created += 1;
+            self.created
+        }
+
+        fn create_text(&mut self, _: &str) -> usize {
+            self.created += 1;
+            self.created
+        }
+
+        fn deep_clone(&mut self, node: usize) -> usize {
+            node
+        }
+
+        fn nth_child(&mut self, parent: usize, _: usize) -> usize {
+            parent
+        }
+
+        fn append_children(&mut self, parent: usize, children: &[usize]) {
+            self.appended.push((parent, children.to_vec()));
+        }
+
+        fn insert_after(&mut self, _: usize, _: &[usize]) {}
+
+        fn insert_before(&mut self, _: usize, _: &[usize]) {}
+
+        fn replace(&mut self, _: usize, _: &[usize]) {}
+
+        fn remove(&mut self, _: usize) {}
+
+        fn set_attribute(
+            &mut self,
+            _: usize,
+            _: &str,
+            _: Option<&str>,
+            _: BorrowedAttributeValue<'_>,
+        ) {
+        }
+
+        fn set_text(&mut self, _: usize, _: &str) {}
+
+        fn add_event_listener(&mut self, _: usize, _: ElementId, _: &str) {}
+
+        fn remove_event_listener(&mut self, _: usize, _: ElementId, _: &str) {}
+
+        fn is_live(&self, node: usize) -> bool {
+            node <= self.created
+        }
+
+        fn parent(&self, _: usize) -> Option<usize> {
+            None
+        }
+    }
+
+    #[test]
+    fn stand_in_anchor_appends_to_the_root() {
+        let mut recorder = Recorder::default();
+        let mut state = StackState::new(0);
+        {
+            let mut writer = StackWriter::new(&mut state, &mut recorder);
+            writer.push_id(ElementId::from_raw(5));
+            writer.create_element("div", None);
+            writer.insert_after(1);
+            writer.pop();
+        }
+        assert_eq!(recorder.appended, [(0, vec![1])]);
+        assert!(state.owns(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "renderer asked for unknown ElementId 5")]
+    fn stand_in_reaching_remove_panics() {
+        let mut recorder = Recorder::default();
+        let mut state = StackState::new(0);
+        let mut writer = StackWriter::new(&mut state, &mut recorder);
+        writer.push_id(ElementId::from_raw(5));
+        writer.remove();
+    }
+
+    #[test]
+    #[should_panic(expected = "renderer asked for unknown ElementId 5")]
+    fn stand_in_reaching_set_text_panics() {
+        let mut recorder = Recorder::default();
+        let mut state = StackState::new(0);
+        let mut writer = StackWriter::new(&mut state, &mut recorder);
+        writer.push_id(ElementId::from_raw(5));
+        writer.set_text("lost");
     }
 }

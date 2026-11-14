@@ -1056,25 +1056,50 @@ fn Late(open: bool) -> Element {
     }
 }
 
-/// Opens and closes a `Late` portal root, checking the host holds its content only while open.
+/// Opens and closes a `Late` portal root twice. The host holds exactly `before`, the content
+/// while open, and `after`, so it is empty apart from them once closed.
 fn open_and_close_a_placeholder_root(
     app: fn() -> Element,
     host: fn(&Harness<DioxusDocument>) -> NodeId,
+    before: &[&str],
+    after: &[&str],
 ) {
+    let expected = |harness: &Harness<DioxusDocument>, open: bool| {
+        let mut nodes: Vec<NodeId> = before.iter().map(|s| node_id(harness, s)).collect();
+        if open {
+            nodes.push(node_id(harness, "#late"));
+        }
+        nodes.extend(after.iter().map(|s| node_id(harness, s)));
+        nodes
+    };
+
     let stage = Rc::new(Cell::new(0));
     let mut harness = with_stage(app, &stage);
     assert_eq!(harness.query("#late"), None);
+    assert_eq!(
+        children(&harness, host(&harness)),
+        expected(&harness, false)
+    );
     for next in [1, 2, 3, 4] {
         stage.set(next);
         rerender(&mut harness);
-        if next % 2 == 1 {
-            let late = node_id(&harness, "#late");
-            assert_eq!(parent(&harness, late), Some(host(&harness)));
+        let open = next % 2 == 1;
+        assert_eq!(children(&harness, host(&harness)), expected(&harness, open));
+        if open {
             assert_eq!(harness.text_content("#late"), "late");
         } else {
             assert_eq!(harness.query("#late"), None);
         }
     }
+}
+
+fn overlay_host(harness: &Harness<DioxusDocument>) -> NodeId {
+    let body = body(harness);
+    *children(harness, body).last().unwrap()
+}
+
+fn outlet_host(harness: &Harness<DioxusDocument>) -> NodeId {
+    node_id(harness, "#outlet")
 }
 
 #[test]
@@ -1089,10 +1114,7 @@ fn placeholder_root_of_an_overlay_portal_is_replaced() {
         }
     }
 
-    open_and_close_a_placeholder_root(app, |harness| {
-        let body = body(harness);
-        *children(harness, body).last().unwrap()
-    });
+    open_and_close_a_placeholder_root(app, overlay_host, &[], &[]);
 }
 
 #[test]
@@ -1107,5 +1129,60 @@ fn placeholder_root_of_an_outlet_portal_is_replaced() {
         }
     }
 
-    open_and_close_a_placeholder_root(app, |harness| node_id(harness, "#outlet"));
+    open_and_close_a_placeholder_root(app, outlet_host, &[], &[]);
+}
+
+#[test]
+fn placeholder_root_content_follows_an_outlets_own_children() {
+    fn app() -> Element {
+        let target = use_portal_outlet("sheet");
+        rsx! {
+            div { id: "outlet", "data-portal-outlet": "sheet",
+                span { id: "own", "own" }
+            }
+            Portal { target,
+                Late { open: stage() % 2 == 1 }
+            }
+        }
+    }
+
+    open_and_close_a_placeholder_root(app, outlet_host, &["#own"], &[]);
+}
+
+#[test]
+fn placeholder_roots_among_others_keep_their_order() {
+    fn between() -> Element {
+        let target = use_portal_target();
+        rsx! {
+            Portal { target,
+                div { id: "first" }
+                Late { open: stage() % 2 == 1 }
+                div { id: "last" }
+            }
+        }
+    }
+
+    fn leading() -> Element {
+        let target = use_portal_target();
+        rsx! {
+            Portal { target,
+                Late { open: stage() % 2 == 1 }
+                div { id: "last" }
+            }
+        }
+    }
+
+    fn trailing() -> Element {
+        let target = use_portal_target();
+        rsx! {
+            Portal { target,
+                div { id: "first" }
+                Late { open: stage() % 2 == 1 }
+            }
+        }
+    }
+
+    open_and_close_a_placeholder_root(between, overlay_host, &["#first"], &["#last"]);
+    open_and_close_a_placeholder_root(leading, overlay_host, &[], &["#last"]);
+    open_and_close_a_placeholder_root(trailing, overlay_host, &["#first"], &[]);
 }
