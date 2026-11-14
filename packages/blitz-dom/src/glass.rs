@@ -388,14 +388,24 @@ fn parse_ident_or_none(p: &mut Parser<'_>) -> Parsed<Option<Atom>> {
     Ok((!ident.eq_ignore_ascii_case("none")).then(|| Atom::from(&**ident)))
 }
 
+/// A finite number; one past the range of `f32` parses as infinity and is rejected.
 fn parse_number(p: &mut Parser<'_>) -> Parsed<f32> {
-    Ok(p.expect_number()?)
+    let value = p.expect_number()?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(unexpected())
+    }
 }
 
-/// A length in px, or a unitless 0. Other units only work through a registration.
+/// A finite length in px, or a unitless 0. Other units only work through a registration.
 fn parse_length(p: &mut Parser<'_>) -> Parsed<f32> {
     match p.next()? {
-        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("px") => Ok(*value),
+        Token::Dimension { value, unit, .. }
+            if unit.eq_ignore_ascii_case("px") && value.is_finite() =>
+        {
+            Ok(*value)
+        }
         Token::Number { value, .. } if *value == 0.0 => Ok(0.0),
         _ => Err(unexpected()),
     }

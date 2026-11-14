@@ -244,6 +244,29 @@ fn overrides_need_a_positive_size() {
 }
 
 #[test]
+fn values_beyond_f32_never_read_as_infinite() {
+    let style = "--glass-w: 1e39px; --glass-h: 4px; --glass-source-offset: 1e39px 2px; \
+                 --glass-magnify: 1e39";
+    // Unregistered, the value parses as infinity and is rejected.
+    let unregistered = props(style, false);
+    assert_eq!(unregistered.geometry, None);
+    assert_eq!(unregistered.source_offset, (0.0, 0.0));
+    assert_eq!(unregistered.magnify, 1.0);
+    // Registered, Stylo clamps the computed value to the largest finite f32.
+    let registered = props(style, true);
+    let geometry = registered
+        .geometry
+        .expect("a clamped width is still positive");
+    assert!(
+        [geometry.x, geometry.y, geometry.w, geometry.h, geometry.r]
+            .iter()
+            .all(|v| v.is_finite())
+    );
+    assert!(registered.source_offset.0.is_finite() && registered.source_offset.1.is_finite());
+    assert!(registered.magnify.is_finite());
+}
+
+#[test]
 fn container_none_is_not_a_container() {
     for registered in [false, true] {
         let container =
