@@ -1302,3 +1302,74 @@ fn overrides_need_a_positive_size() {
         assert_eq!(shape.kind, own, "{size}");
     }
 }
+
+#[test]
+fn press_touch_and_materialize_reach_the_shape() {
+    let base = "width:100px; height:20px; margin-left:40px; --glass:regular";
+    let shape = shape_of(&format!(
+        "{base}; --glass-press:0.4; --glass-touch-x:30px; --glass-touch-y:12px; \
+         --glass-materialize:0.25"
+    ));
+    assert_eq!(shape.press, 0.4);
+    assert_eq!(shape.touch, Some(Point::new(30.0, 12.0)));
+    assert_eq!(shape.materialize, 0.25);
+    // The touch is in the border box's own coordinates, so it maps past the element's margin.
+    let device = Affine::scale(SCALE) * shape.transform * Point::new(30.0, 12.0);
+    assert_near(device, Point::new(70.0 * SCALE, 12.0 * SCALE));
+
+    // The origin is a valid touch.
+    let origin = shape_of(&format!(
+        "{base}; --glass-press:1; --glass-touch-x:0px; --glass-touch-y:0px"
+    ));
+    assert_eq!(origin.press, 1.0);
+    assert_eq!(origin.touch, Some(Point::ORIGIN));
+
+    // Morph overrides change the box, not the frame the touch is in.
+    let morphed = shape_of(&format!(
+        "{base}; --glass-x:50px; --glass-y:10px; --glass-w:40px; --glass-h:10px; \
+         --glass-press:0.5; --glass-touch-x:30px; --glass-touch-y:12px"
+    ));
+    assert_eq!(morphed.touch, Some(Point::new(30.0, 12.0)));
+    assert_eq!(morphed.transform, shape.transform);
+
+    // Out-of-range values arrive clamped.
+    let clamped = shape_of(&format!("{base}; --glass-press:3; --glass-materialize:-1"));
+    assert_eq!(clamped.press, 1.0);
+    assert_eq!(clamped.materialize, 0.0);
+}
+
+#[test]
+fn touch_needs_both_coordinates() {
+    let base = "width:100px; height:20px; --glass:regular";
+    let resting = shape_of(&format!(
+        "{base}; --glass-press:0; --glass-touch-x:30px; --glass-touch-y:12px"
+    ));
+    assert_eq!(resting.press, 0.0);
+    assert_eq!(resting.touch, None);
+
+    let unset = shape_of(&format!(
+        "{base}; --glass-touch-x:30px; --glass-touch-y:12px"
+    ));
+    assert_eq!(unset.touch, None);
+
+    // While pressed, an unset coordinate is 0.
+    let pressed = shape_of(&format!("{base}; --glass-press:0.5; --glass-touch-x:30px"));
+    assert_eq!(pressed.touch, Some(Point::new(30.0, 0.0)));
+}
+
+#[test]
+fn defaults_leave_the_shape_unchanged() {
+    let page = |extra: &str| {
+        scene_for(&format!(
+            "<div style='width:100px; height:20px; --glass:regular; {extra}'></div>"
+        ))
+    };
+    let plain = page("");
+    let shape = only_shape(&plain);
+    assert_eq!(shape.press, 0.0);
+    assert_eq!(shape.touch, None);
+    assert_eq!(shape.materialize, 1.0);
+
+    let explicit = page("--glass-press:0; --glass-materialize:1; --glass-touch-x:5px");
+    assert_eq!(plain.commands, explicit.commands);
+}

@@ -6,7 +6,9 @@ use anyrender::glass::{
     BackdropSource, CornerStyle, GlassMaterial, GlassShape, GlassVariant, ShapeKind,
 };
 use blitz_dom::glass::{GlassProps, GlassVariant as PropVariant};
-use kurbo::{Affine, BezPath, Ellipse, Insets, Rect, RoundedRect, RoundedRectRadii, Shape, Vec2};
+use kurbo::{
+    Affine, BezPath, Ellipse, Insets, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Vec2,
+};
 
 use super::clip_path::GlassClip;
 use crate::kurbo_css::{CssBox, NonUniformRoundedRectRadii, corner_style};
@@ -41,6 +43,8 @@ pub(crate) struct BuiltShape {
 ///
 /// The morph overrides in `props`, when set, replace the box and its radii. Otherwise `clip`,
 /// the element's clip path, gives the shape, and without one the border box and its radii do.
+/// The shape carries the press, touch and materialize in `props`; the touch is already in
+/// the shape's own coordinates.
 /// Returns `None` for an empty box or shape, or a non-invertible transform.
 pub(crate) fn glass_shape(
     frame: &CssBox,
@@ -105,8 +109,25 @@ pub(crate) fn glass_shape(
     material.tint = props.tint;
     material.interactive = props.interactive;
 
+    // Each builder runs only off its default, so an unset shape stays equal to `new`'s. The
+    // builders panic on non-finite input, which the guards also keep out.
+    let mut shape = GlassShape::new(id, transform, kind, material);
+    if props.press.is_finite() && props.press != 0.0 {
+        shape = shape.with_press(props.press);
+    }
+    if let Some((x, y)) = props.touch {
+        // Already in the border box's CSS px, the shape's own space, whatever the overrides do.
+        let touch = Point::new(f64::from(x), f64::from(y));
+        if touch.is_finite() {
+            shape = shape.with_touch(touch);
+        }
+    }
+    if props.materialize.is_finite() && props.materialize != 1.0 {
+        shape = shape.with_materialize(props.materialize);
+    }
+
     Some(BuiltShape {
-        shape: GlassShape::new(id, transform, kind, material),
+        shape,
         rounded_elliptical,
         evenodd,
     })
