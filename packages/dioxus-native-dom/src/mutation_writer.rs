@@ -45,6 +45,12 @@ pub(crate) trait RealDom {
     fn add_event_listener(&mut self, node: Self::NodeId, element_id: ElementId, name: &str);
 
     fn remove_event_listener(&mut self, node: Self::NodeId, element_id: ElementId, name: &str);
+
+    /// Whether `node` still exists.
+    fn is_live(&self, node: Self::NodeId) -> bool;
+
+    /// Whether `node` is a proper descendant of `ancestor`.
+    fn is_descendant(&self, ancestor: Self::NodeId, node: Self::NodeId) -> bool;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -190,9 +196,24 @@ pub(crate) struct StackWriter<'a, R: RealDom> {
     backend: R,
 }
 
-impl<'a, R: RealDom> StackWriter<'a, R> {
+impl<'a, R: RealDom> StackWriter<'a, R>
+where
+    R::NodeId: PartialEq,
+{
     fn new(state: &'a mut StackState<R::NodeId>, backend: R) -> Self {
         Self { state, backend }
+    }
+
+    /// Appends `nodes` to a portal target's root when `anchor` isn't one of its nodes, as with
+    /// the stand-in `push_id` pushes for an anchor from another target. Returns whether it did.
+    fn append_for_foreign_anchor(&mut self, anchor: R::NodeId, nodes: &[R::NodeId]) -> bool {
+        let root = self.state.root;
+        if self.state.owned.is_none() || self.backend.is_descendant(root, anchor) {
+            return false;
+        }
+        self.backend.append_children(root, nodes);
+        self.state.own(nodes);
+        true
     }
 }
 
@@ -201,6 +222,19 @@ where
     R::NodeId: PartialEq,
 {
     fn push_id(&mut self, id: ElementId) {
+        // dioxus-core anchors the content of a portal whose whole output was empty on a node of
+        // the target that holds the `Portal`, whose id means nothing here. A portal target
+        // stands its root in for such an anchor, and the content goes into the host.
+        if self.state.owned.is_some()
+            && !self
+                .state
+                .element_to_node(id)
+                .is_some_and(|node| self.backend.is_live(node))
+        {
+            let root = self.state.root;
+            self.state.push(root, None);
+            return;
+        }
         let node = self.state.lookup(id);
         self.state.push(node, Some(id));
     }
@@ -259,6 +293,9 @@ where
     fn insert_after(&mut self, m: usize) {
         let nodes = self.state.pop_nodes(m);
         let anchor = self.state.top().node;
+        if self.append_for_foreign_anchor(anchor, &nodes) {
+            return;
+        }
         self.backend.insert_after(anchor, &nodes);
         if self.state.owns(anchor) {
             self.state.own(&nodes);
@@ -268,6 +305,9 @@ where
     fn insert_before(&mut self, m: usize) {
         let nodes = self.state.pop_nodes(m);
         let anchor = self.state.top().node;
+        if self.append_for_foreign_anchor(anchor, &nodes) {
+            return;
+        }
         self.backend.insert_before(anchor, &nodes);
         if self.state.owns(anchor) {
             self.state.own(&nodes);
@@ -849,6 +889,22 @@ impl RealDom for BlitzBackend<'_> {
             let idx = kind.discriminant() as usize;
             self.event_handler_counts[idx] -= 1;
         }
+    }
+
+    fn is_live(&self, node: NodeId) -> bool {
+        self.docm.doc.get_node(node).is_some()
+    }
+
+    fn is_descendant(&self, ancestor: NodeId, node: NodeId) -> bool {
+        let parent = |node: NodeId| self.docm.doc.get_node(node).and_then(|node| node.parent);
+        let mut current = parent(node);
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            current = parent(id);
+        }
+        false
     }
 }
 

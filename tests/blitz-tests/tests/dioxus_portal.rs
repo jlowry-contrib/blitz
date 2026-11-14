@@ -1044,3 +1044,68 @@ fn moved_outlet_content_keeps_its_order_once() {
         assert_eq!(children(&harness, node_id(&harness, other)), vec![]);
     }
 }
+
+/// A portal root that renders nothing while closed, as a sheet does.
+#[component]
+fn Late(open: bool) -> Element {
+    if !open {
+        return VNode::empty();
+    }
+    rsx! {
+        div { id: "late", "late" }
+    }
+}
+
+/// Opens and closes a `Late` portal root, checking the host holds its content only while open.
+fn open_and_close_a_placeholder_root(
+    app: fn() -> Element,
+    host: fn(&Harness<DioxusDocument>) -> NodeId,
+) {
+    let stage = Rc::new(Cell::new(0));
+    let mut harness = with_stage(app, &stage);
+    assert_eq!(harness.query("#late"), None);
+    for next in [1, 2, 3, 4] {
+        stage.set(next);
+        rerender(&mut harness);
+        if next % 2 == 1 {
+            let late = node_id(&harness, "#late");
+            assert_eq!(parent(&harness, late), Some(host(&harness)));
+            assert_eq!(harness.text_content("#late"), "late");
+        } else {
+            assert_eq!(harness.query("#late"), None);
+        }
+    }
+}
+
+#[test]
+fn placeholder_root_of_an_overlay_portal_is_replaced() {
+    fn app() -> Element {
+        let target = use_portal_target();
+        rsx! {
+            div { id: "page" }
+            Portal { target,
+                Late { open: stage() % 2 == 1 }
+            }
+        }
+    }
+
+    open_and_close_a_placeholder_root(app, |harness| {
+        let body = body(harness);
+        *children(harness, body).last().unwrap()
+    });
+}
+
+#[test]
+fn placeholder_root_of_an_outlet_portal_is_replaced() {
+    fn app() -> Element {
+        let target = use_portal_outlet("sheet");
+        rsx! {
+            div { id: "outlet", "data-portal-outlet": "sheet" }
+            Portal { target,
+                Late { open: stage() % 2 == 1 }
+            }
+        }
+    }
+
+    open_and_close_a_placeholder_root(app, |harness| node_id(harness, "#outlet"));
+}
