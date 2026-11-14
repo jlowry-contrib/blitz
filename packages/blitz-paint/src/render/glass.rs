@@ -159,7 +159,7 @@ pub(crate) fn has_region(props: &GlassProps) -> bool {
 }
 
 /// The `Region` backdrop of `shape`: its box, moved by `offset` in CSS px and scaled by
-/// `1 / magnify` about its centre, under the shape's transform.
+/// `1 / magnify` about its centre, under the shape's transform; `None` if that box isn't finite.
 pub(crate) fn region_source(
     shape: &GlassShape,
     magnify: f32,
@@ -173,8 +173,9 @@ pub(crate) fn region_source(
         _ => return None,
     };
     let moved = bounds + Vec2::new(f64::from(dx), f64::from(dy));
-    Some(BackdropSource::Region {
-        rect: Rect::from_center_size(moved.center(), moved.size() / f64::from(magnify)),
+    let rect = Rect::from_center_size(moved.center(), moved.size() / f64::from(magnify));
+    rect.is_finite().then_some(BackdropSource::Region {
+        rect,
         transform: shape.transform,
     })
 }
@@ -288,6 +289,13 @@ mod tests {
             panic!("no region");
         };
         assert_rect_near(rect, Rect::new(15.0, 20.0, 35.0, 60.0));
+    }
+
+    #[test]
+    fn region_with_a_non_finite_offset_is_none() {
+        let capsule = shape(ShapeKind::Capsule(RECT), Affine::IDENTITY);
+        assert!(region_source(&capsule, 1.0, (f32::INFINITY, 0.0)).is_none());
+        assert!(region_source(&capsule, 1.0, (0.0, f32::NAN)).is_none());
     }
 
     #[test]

@@ -1342,7 +1342,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 }
 
 /// Set on a clipping container's node id to give its members' group an id of its own, apart
-/// from the container's own glass; node ids are slab indices, far below this bit.
+/// from the container's own glass. This is the top bit of the id's 32-bit slot version, which
+/// grows by two each time the slot is reused, so a collision needs one slot reused 2^30 times.
 const CLIPPED_MEMBERS_ID_BIT: u64 = 1 << 63;
 
 /// The glass groups an element draws.
