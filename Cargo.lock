@@ -2724,6 +2724,7 @@ dependencies = [
  "slotmap",
  "tokio",
  "tracing",
+ "vello",
  "webbrowser",
  "wgpu_context",
  "winit",

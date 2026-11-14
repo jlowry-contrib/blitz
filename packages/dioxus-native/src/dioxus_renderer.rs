@@ -193,11 +193,62 @@ impl WindowRenderer for DioxusNativeWindowRenderer {
         self.inner.borrow().is_pending()
     }
 
+    fn wants_redraw(&self) -> bool {
+        self.inner.borrow().wants_redraw()
+    }
+
     fn set_size(&mut self, width: u32, height: u32) {
         self.inner.borrow_mut().set_size(width, height)
     }
 
     fn render<F: FnOnce(&mut Self::ScenePainter<'_>)>(&mut self, draw_fn: F) {
         self.inner.borrow_mut().render(draw_fn)
+    }
+}
+
+#[cfg(all(test, feature = "vello"))]
+mod tests {
+    use std::sync::Arc;
+
+    use anyrender::WindowRenderer;
+    use anyrender::glass::GlassGroup;
+    use anyrender_vello::glass::{FrameInputs, GlassBackend, GlassRegions};
+    use anyrender_vello::wgpu::{CommandEncoder, Device, Queue};
+    use peniko::kurbo::Rect;
+    use vello::glass::{GlassFrame, GlassPasses, GlassPhase};
+
+    use super::{DioxusNativeWindowRenderer, RendererOptions};
+
+    /// A backend that asks for another frame and draws nothing.
+    struct Animating;
+
+    impl GlassPasses for Animating {
+        fn prepare(&mut self, _: &Device, _: &Queue, _: &GlassFrame<'_>) {}
+        fn record(&mut self, _: &Device, _: &mut CommandEncoder, _: &GlassPhase<'_>) {}
+    }
+
+    impl GlassBackend for Animating {
+        fn regions(&self, _: &GlassGroup, _: &FrameInputs) -> GlassRegions {
+            GlassRegions {
+                region: Rect::ZERO,
+                composite: Rect::ZERO,
+            }
+        }
+
+        fn begin_frame(&mut self, _: &[Arc<GlassGroup>], _: &FrameInputs) {}
+
+        fn wants_redraw(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn forwards_wants_redraw_from_the_inner_renderer() {
+        assert!(!DioxusNativeWindowRenderer::new().wants_redraw());
+        let renderer = DioxusNativeWindowRenderer::with_options(RendererOptions {
+            glass_backend: Some(Box::new(Animating)),
+            ..Default::default()
+        });
+        assert!(renderer.wants_redraw());
     }
 }
