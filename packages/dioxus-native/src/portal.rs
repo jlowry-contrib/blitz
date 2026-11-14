@@ -38,14 +38,13 @@ pub fn use_portal_target() -> RenderTargetId {
 ///
 /// The key is read once. Until both the target and such an element exist, the target renders
 /// nothing; its writes wait and are applied when the element appears. If the element goes,
-/// the content is kept out of the document until another one with the key appears. A key that
-/// is already registered keeps its first target, and this one's writes are dropped.
+/// the content is kept out of the document until another one with the key appears. While
+/// another target holds the key, this one waits and takes the key once that target goes.
 ///
-/// The target is removed once its owner drops and nothing is mounted in it; the element stays.
-/// Keep every [`Portal`] for this target inside the owner's subtree, as with
-/// [`use_portal_target`], and keep the element's own children out of it, since the target is
-/// only removed once the element is empty. Outside a Dioxus Native document nothing hosts the
-/// target, so its writes are dropped.
+/// The target is removed once its owner drops and nothing is mounted in it; the element and
+/// its own children stay. Keep every [`Portal`] for this target inside the owner's subtree, as
+/// with [`use_portal_target`]. Outside a Dioxus Native document nothing hosts the target, so
+/// its writes are dropped.
 pub fn use_portal_outlet(key: &str) -> RenderTargetId {
     // A weak handle, because the runtime owns this cleanup closure.
     let runtime = Rc::downgrade(&Runtime::current());

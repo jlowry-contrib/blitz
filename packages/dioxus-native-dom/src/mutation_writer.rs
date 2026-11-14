@@ -59,10 +59,22 @@ struct StackState<N> {
     root: N,
     stack: Vec<StackEntry<N>>,
     element_to_node: Vec<Option<N>>,
+    /// The nodes this stack placed directly under its root, or `None` when the root holds only
+    /// this stack's nodes and so isn't tracked
+    owned: Option<Vec<N>>,
 }
 
-impl<N: Copy> StackState<N> {
+impl<N: Copy + PartialEq> StackState<N> {
+    /// A stack rooted at a host that may also hold other targets' nodes.
     fn new(root: N) -> Self {
+        Self {
+            owned: Some(Vec::new()),
+            ..Self::untracked(root)
+        }
+    }
+
+    /// A stack rooted at a node that holds only this stack's nodes, such as `<main>`.
+    fn untracked(root: N) -> Self {
         Self {
             root,
             stack: vec![StackEntry {
@@ -70,6 +82,31 @@ impl<N: Copy> StackState<N> {
                 element_id: Some(ElementId::ROOT),
             }],
             element_to_node: vec![Some(root)],
+            owned: None,
+        }
+    }
+
+    /// Whether this stack placed `node` directly under its root.
+    fn owns(&self, node: N) -> bool {
+        self.owned
+            .as_ref()
+            .is_some_and(|owned| owned.contains(&node))
+    }
+
+    /// The nodes this stack placed directly under its root.
+    fn owned(&self) -> &[N] {
+        self.owned.as_deref().unwrap_or_default()
+    }
+
+    fn own(&mut self, nodes: &[N]) {
+        if let Some(owned) = &mut self.owned {
+            owned.extend_from_slice(nodes);
+        }
+    }
+
+    fn disown(&mut self, node: N) {
+        if let Some(owned) = &mut self.owned {
+            owned.retain(|owned| *owned != node);
         }
     }
 
@@ -153,7 +190,10 @@ impl<'a, R: RealDom> StackWriter<'a, R> {
     }
 }
 
-impl<R: RealDom> WriteMutations for StackWriter<'_, R> {
+impl<R: RealDom> WriteMutations for StackWriter<'_, R>
+where
+    R::NodeId: PartialEq,
+{
     fn push_id(&mut self, id: ElementId) {
         let node = self.state.lookup(id);
         self.state.push(node, Some(id));
@@ -194,12 +234,19 @@ impl<R: RealDom> WriteMutations for StackWriter<'_, R> {
         let children = self.state.pop_nodes(m);
         let parent = self.state.top().node;
         self.backend.append_children(parent, &children);
+        if parent == self.state.root {
+            self.state.own(&children);
+        }
     }
 
     fn replace_with(&mut self, m: usize) {
         let replacements = self.state.pop_nodes(m);
         let target = self.state.pop_entry();
         self.backend.replace(target.node, &replacements);
+        if self.state.owns(target.node) {
+            self.state.disown(target.node);
+            self.state.own(&replacements);
+        }
         self.state.clear_mapping(target);
     }
 
@@ -207,12 +254,18 @@ impl<R: RealDom> WriteMutations for StackWriter<'_, R> {
         let nodes = self.state.pop_nodes(m);
         let anchor = self.state.top().node;
         self.backend.insert_after(anchor, &nodes);
+        if self.state.owns(anchor) {
+            self.state.own(&nodes);
+        }
     }
 
     fn insert_before(&mut self, m: usize) {
         let nodes = self.state.pop_nodes(m);
         let anchor = self.state.top().node;
         self.backend.insert_before(anchor, &nodes);
+        if self.state.owns(anchor) {
+            self.state.own(&nodes);
+        }
     }
 
     fn set_attribute(&mut self, name: &str, ns: Option<&str>, value: BorrowedAttributeValue<'_>) {
@@ -246,6 +299,7 @@ impl<R: RealDom> WriteMutations for StackWriter<'_, R> {
     fn remove(&mut self) {
         let entry = self.state.pop_entry();
         self.backend.remove(entry.node);
+        self.state.disown(entry.node);
         self.state.clear_mapping(entry);
     }
 }
@@ -318,7 +372,7 @@ struct TargetState {
 impl TargetState {
     fn hosted(host: NodeId) -> Self {
         Self {
-            stack: Some(StackState::new(host)),
+            stack: Some(StackState::untracked(host)),
             ..Self::default()
         }
     }
@@ -335,6 +389,8 @@ pub struct DioxusState {
     dropped_targets: BTreeSet<RenderTargetId>,
     /// The outlet registry: each key's render target
     outlets: BTreeMap<String, RenderTargetId>,
+    /// Targets registered under a key another target holds, in registration order
+    waiting_outlets: Vec<(String, RenderTargetId)>,
     /// The current host of each outlet target that has one, kept alive when its element goes
     outlet_hosts: Vec<NodeId>,
     /// Whether a mutation may have added, moved or removed an outlet element
@@ -351,6 +407,7 @@ impl DioxusState {
             portal_hosts: PortalHosts::default(),
             dropped_targets: BTreeSet::new(),
             outlets: BTreeMap::new(),
+            waiting_outlets: Vec::new(),
             outlet_hosts: Vec::new(),
             outlets_dirty: false,
             event_handler_counts: [0; 64],
@@ -394,23 +451,44 @@ impl DioxusState {
         self.targets.entry(target).or_default().stack = Some(StackState::new(host));
     }
 
+    /// Whether `target` has nothing of its own under its host, or has no host.
+    pub(crate) fn owns_nothing(&self, target: RenderTargetId) -> bool {
+        self.targets
+            .get(&target)
+            .and_then(|state| state.stack.as_ref())
+            .is_none_or(|stack| stack.owned().is_empty())
+    }
+
+    /// Whether an outlet may have gained or lost its element since mutations were last applied.
+    pub(crate) fn outlets_pending(&self) -> bool {
+        self.outlets_dirty && !self.outlets.is_empty()
+    }
+
     /// Forgets `target`, so its later writes are dropped, and returns the host to drop with it.
     ///
     /// An outlet's element belongs to the app, so it is returned only once it has left the
-    /// document.
+    /// document. A key `target` held passes to the first target waiting for it.
     pub(crate) fn remove_target(
         &mut self,
         doc: &BaseDocument,
         target: RenderTargetId,
     ) -> Option<NodeId> {
         let state = self.targets.remove(&target)?;
-        let host = state.stack?.root;
+        let host = state.stack.map(|stack| stack.root);
         let Some(key) = state.outlet else {
-            return Some(host);
+            return host;
         };
+        self.waiting_outlets
+            .retain(|(_, waiting)| *waiting != target);
         if self.outlets.get(&key) == Some(&target) {
             self.outlets.remove(&key);
+            if let Some(index) = self.waiting_outlets.iter().position(|(k, _)| *k == key) {
+                let (key, next) = self.waiting_outlets.remove(index);
+                self.outlets.insert(key, next);
+                self.outlets_dirty = true;
+            }
         }
+        let host = host?;
         self.outlet_hosts.retain(|outlet| *outlet != host);
         doc.get_node(host)
             .is_some_and(|node| node.parent.is_none())
@@ -420,25 +498,18 @@ impl DioxusState {
     /// Registers `target` as the outlet for `key`, hosted by the element with
     /// `data-portal-outlet="<key>"` once one exists.
     ///
-    /// A key that is already registered keeps its target, and `target`'s writes are dropped.
+    /// While another target holds the key, `target` buffers its writes and waits for it.
     pub(crate) fn register_outlet(&mut self, key: String, target: RenderTargetId) {
-        if let Some(existing) = self.outlets.get(&key)
-            && *existing != target
-        {
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                name: "dioxus_native.portal.duplicate_outlet",
-                key = %key,
-                render_target = ?target,
-                "the outlet key already has a render target, so this one's writes are dropped"
-            );
-            self.targets.remove(&target);
-            self.dropped_targets.insert(target);
-            return;
-        }
         self.targets.entry(target).or_default().outlet = Some(key.clone());
-        self.outlets.insert(key, target);
-        self.outlets_dirty = true;
+        match self.outlets.get(&key) {
+            Some(existing) if *existing != target => {
+                self.waiting_outlets.push((key, target));
+            }
+            _ => {
+                self.outlets.insert(key, target);
+                self.outlets_dirty = true;
+            }
+        }
     }
 
     /// Hosts each outlet target in the first element, in tree order, whose
@@ -466,7 +537,7 @@ impl DioxusState {
                 (Some(stack), Some(element)) if stack.root != element => {
                     let old = stack.root;
                     let mut docm = doc.mutate();
-                    docm.reparent_children(old, element);
+                    docm.append_children(element, stack.owned());
                     stack.set_root(element);
                     if docm.parent_id(old).is_none() {
                         docm.remove_and_drop_node(old);
@@ -478,7 +549,7 @@ impl DioxusState {
                     // The element is still in the document, but no longer names the key.
                     let mut docm = doc.mutate();
                     let parked = docm.create_element(qual_name("div", None), Vec::new());
-                    docm.reparent_children(stack.root, parked);
+                    docm.append_children(parked, stack.owned());
                     stack.set_root(parked);
                 }
                 _ => {}
@@ -492,21 +563,27 @@ impl DioxusState {
         first_hosts
     }
 
-    /// The target `node` is content of: the one hosted by its nearest proper DOM ancestor, or
-    /// ROOT if none is. A host itself is content of the target it was rendered in.
+    /// The target `node` is content of: the nearest whose host is a proper DOM ancestor and
+    /// that placed the node on the path to it there, or ROOT if none is. A host, and an outlet
+    /// element's own children, are content of the target that rendered them.
     pub(crate) fn target_of_node(&self, doc: &BaseDocument, node: NodeId) -> RenderTargetId {
         if self.targets.len() == 1 {
             return RenderTargetId::ROOT;
         }
-        let mut current = doc.get_node(node).and_then(|node| node.parent);
-        while let Some(node) = current {
+        let parent = |node: NodeId| doc.get_node(node).and_then(|node| node.parent);
+        let mut child = node;
+        let mut current = parent(node);
+        while let Some(ancestor) = current {
             let hosted = self.targets.iter().find_map(|(target, state)| {
-                (state.stack.as_ref()?.root == node).then_some(*target)
+                let stack = state.stack.as_ref()?;
+                (stack.root == ancestor && (stack.owned.is_none() || stack.owns(child)))
+                    .then_some(*target)
             });
             if let Some(target) = hosted {
                 return target;
             }
-            current = doc.get_node(node).and_then(|node| node.parent);
+            child = ancestor;
+            current = parent(ancestor);
         }
         RenderTargetId::ROOT
     }

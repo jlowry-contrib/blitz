@@ -882,3 +882,113 @@ fn outlet_content_follows_the_key_between_elements() {
         }
     }
 }
+
+#[test]
+fn swapping_the_owner_in_one_render_hands_the_key_over() {
+    fn page(name: &'static str) -> Element {
+        let target = use_portal_outlet("sheet");
+        rsx! {
+            Portal { target,
+                div { id: name, "{name}" }
+            }
+        }
+    }
+
+    // Two component types, so the swap unmounts one owner and mounts the other.
+    #[component]
+    fn PageA() -> Element {
+        page("a")
+    }
+
+    #[component]
+    fn PageB() -> Element {
+        page("b")
+    }
+
+    fn app() -> Element {
+        rsx! {
+            div { id: "outlet", "data-portal-outlet": "sheet" }
+            if stage().is_multiple_of(2) {
+                PageA {}
+            } else {
+                PageB {}
+            }
+        }
+    }
+
+    let stage = Rc::new(Cell::new(0));
+    let mut harness = with_stage(app, &stage);
+    let outlet = node_id(&harness, "#outlet");
+    assert_eq!(children(&harness, outlet), vec![node_id(&harness, "#a")]);
+
+    for (next, shown, gone) in [(1, "#b", "#a"), (2, "#a", "#b"), (3, "#b", "#a")] {
+        stage.set(next);
+        rerender(&mut harness);
+        assert_eq!(harness.query(gone), None);
+        assert_eq!(children(&harness, outlet), vec![node_id(&harness, shown)]);
+    }
+}
+
+#[test]
+fn outlet_children_of_its_own_stay_with_root() {
+    #[component]
+    fn Sheet() -> Element {
+        let target = use_portal_outlet("sheet");
+        let Counts { portal, .. } = consume_context::<Counts>();
+        rsx! {
+            Portal { target,
+                // A numbered element first, so the button's id matches the ROOT child's.
+                span { onclick: move |_| {} }
+                button { id: "portal", onclick: move |_| bump(&portal), "portal" }
+            }
+        }
+    }
+
+    fn app() -> Element {
+        let Counts { root, .. } = consume_context::<Counts>();
+        let stage = consume_context::<Rc<Cell<usize>>>().get();
+        rsx! {
+            div { id: "outlet", "data-portal-outlet": "sheet",
+                button { id: "own", onclick: move |_| bump(&root), "own" }
+            }
+            if stage != 1 {
+                Sheet {}
+            }
+        }
+    }
+
+    let counts = Counts::default();
+    let stage = Rc::new(Cell::new(0_usize));
+    let vdom = VirtualDom::new(app)
+        .with_root_context(counts.clone())
+        .with_root_context(Rc::clone(&stage));
+    let mut harness = Harness::from_vdom(vdom, HarnessOptions::default());
+    let outlet = node_id(&harness, "#outlet");
+    let own = node_id(&harness, "#own");
+    let content = |harness: &Harness<DioxusDocument>| {
+        vec![own, node_id(harness, "span"), node_id(harness, "#portal")]
+    };
+    assert_eq!(children(&harness, outlet), content(&harness));
+    // Each target numbers its elements from its own arena, so both buttons carry the same id.
+    assert_eq!(
+        harness.attr("#own", "data-dioxus-id"),
+        harness.attr("#portal", "data-dioxus-id")
+    );
+
+    // The outlet's own child is ROOT's, though it shares the host with the portal's content.
+    harness.click("#own");
+    assert_eq!(counts.get(), (1, 0));
+    harness.click("#portal");
+    assert_eq!(counts.get(), (1, 1));
+
+    // The owner drops: its target goes although the outlet still has a child, and the key is
+    // free for the next owner.
+    stage.set(1);
+    rerender(&mut harness);
+    assert_eq!(children(&harness, outlet), vec![own]);
+    stage.set(2);
+    rerender(&mut harness);
+    assert_eq!(children(&harness, outlet), content(&harness));
+    harness.click("#portal");
+    assert_eq!(counts.get(), (1, 2));
+}
