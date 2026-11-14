@@ -214,12 +214,17 @@ impl<N: Copy + PartialEq> StackState<N> {
         };
     }
 
+    /// Pops the top `m` nodes, which an insertion places or a replacement puts in.
+    ///
+    /// # Panics
+    ///
+    /// Panics if one is a stand-in: an id with no node can't be moved.
     fn pop_nodes(&mut self, m: usize) -> Vec<N> {
         let split = self.stack.len() - m;
         self.stack
             .split_off(split)
             .into_iter()
-            .map(|entry| entry.node)
+            .map(|entry| entry.real().node)
             .collect()
     }
 }
@@ -1224,12 +1229,26 @@ mod tests {
 mod stand_in_tests {
     use super::{RealDom, StackState, StackWriter};
     use dioxus_core::{BorrowedAttributeValue, ElementId, WriteMutations as _};
+    use std::collections::HashMap;
 
-    /// A tree of numbered nodes that records appends; node 0 is the root.
+    /// A tree of numbered nodes that records appends and inserts; node 0 is the root.
     #[derive(Default)]
     struct Recorder {
         created: usize,
+        parents: HashMap<usize, usize>,
         appended: Vec<(usize, Vec<usize>)>,
+        inserted_after: Vec<(usize, Vec<usize>)>,
+    }
+
+    impl Recorder {
+        fn adopt(&mut self, parent: Option<usize>, nodes: &[usize]) {
+            for node in nodes {
+                match parent {
+                    Some(parent) => self.parents.insert(*node, parent),
+                    None => self.parents.remove(node),
+                };
+            }
+        }
     }
 
     impl RealDom for &mut Recorder {
@@ -1254,12 +1273,20 @@ mod stand_in_tests {
         }
 
         fn append_children(&mut self, parent: usize, children: &[usize]) {
+            self.adopt(Some(parent), children);
             self.appended.push((parent, children.to_vec()));
         }
 
-        fn insert_after(&mut self, _: usize, _: &[usize]) {}
+        fn insert_after(&mut self, anchor: usize, nodes: &[usize]) {
+            let parent = self.parents.get(&anchor).copied();
+            self.adopt(parent, nodes);
+            self.inserted_after.push((anchor, nodes.to_vec()));
+        }
 
-        fn insert_before(&mut self, _: usize, _: &[usize]) {}
+        fn insert_before(&mut self, anchor: usize, nodes: &[usize]) {
+            let parent = self.parents.get(&anchor).copied();
+            self.adopt(parent, nodes);
+        }
 
         fn replace(&mut self, _: usize, _: &[usize]) {}
 
@@ -1284,9 +1311,13 @@ mod stand_in_tests {
             node <= self.created
         }
 
-        fn parent(&self, _: usize) -> Option<usize> {
-            None
+        fn parent(&self, node: usize) -> Option<usize> {
+            self.parents.get(&node).copied()
         }
+    }
+
+    fn id(raw: usize) -> ElementId {
+        ElementId::from_raw(raw)
     }
 
     #[test]
@@ -1322,5 +1353,70 @@ mod stand_in_tests {
         let mut writer = StackWriter::new(&mut state, &mut recorder);
         writer.push_id(ElementId::from_raw(5));
         writer.set_text("lost");
+    }
+
+    #[test]
+    #[should_panic(expected = "renderer asked for unknown ElementId 5")]
+    fn stand_in_moved_as_a_child_panics() {
+        let mut recorder = Recorder::default();
+        let mut state = StackState::new(0);
+        let mut writer = StackWriter::new(&mut state, &mut recorder);
+        writer.push_id(ElementId::ROOT);
+        writer.push_id(id(5));
+        writer.append_children(1);
+    }
+
+    #[test]
+    fn live_anchor_outside_the_content_appends_to_the_root() {
+        // Node 1 is a child of the root the target didn't place, as an outlet's own child is;
+        // node 2 is outside the root altogether.
+        let mut recorder = Recorder {
+            created: 2,
+            parents: HashMap::from([(1, 0)]),
+            ..Recorder::default()
+        };
+        let mut state = StackState::new(0);
+        state.set_mapping(id(7), 1);
+        state.set_mapping(id(8), 2);
+        {
+            let mut writer = StackWriter::new(&mut state, &mut recorder);
+            for anchor in [7, 8] {
+                writer.push_id(id(anchor));
+                writer.create_element("div", None);
+                writer.insert_after(1);
+                writer.pop();
+            }
+        }
+        assert_eq!(recorder.appended, [(0, vec![3]), (0, vec![4])]);
+        assert!(recorder.inserted_after.is_empty());
+        assert!(state.owns(3) && state.owns(4));
+    }
+
+    #[test]
+    fn anchor_inside_the_content_inserts_in_place() {
+        let mut recorder = Recorder::default();
+        let mut state = StackState::new(0);
+        {
+            let mut writer = StackWriter::new(&mut state, &mut recorder);
+            // Node 1 goes under the root, and node 2 inside it.
+            writer.push_id(ElementId::ROOT);
+            writer.create_element("div", None);
+            writer.set_id(id(1));
+            writer.append_children(1);
+            writer.pop();
+            writer.push_id(id(1));
+            writer.create_element("span", None);
+            writer.set_id(id(2));
+            writer.append_children(1);
+            writer.pop();
+            // Node 3 goes after node 2, inside node 1.
+            writer.push_id(id(2));
+            writer.create_element("span", None);
+            writer.insert_after(1);
+            writer.pop();
+        }
+        assert_eq!(recorder.inserted_after, [(2, vec![3])]);
+        assert_eq!(recorder.parents.get(&3), Some(&1));
+        assert!(!state.owns(3));
     }
 }
