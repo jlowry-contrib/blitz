@@ -992,3 +992,55 @@ fn outlet_children_of_its_own_stay_with_root() {
     harness.click("#portal");
     assert_eq!(counts.get(), (1, 2));
 }
+
+#[test]
+fn moved_outlet_content_keeps_its_order_once() {
+    /// Each stage's item order; the key sits on `#first` until stage 3.
+    const ORDERS: [[usize; 3]; 5] = [[1, 2, 3], [3, 1, 2], [2, 3, 1], [2, 3, 1], [1, 2, 3]];
+
+    fn app() -> Element {
+        let target = use_portal_outlet("sheet");
+        let stage = stage();
+        let key = |second: bool| (second == (stage == 3)).then_some("sheet");
+        rsx! {
+            div { id: "first", "data-portal-outlet": key(false) }
+            div { id: "second", "data-portal-outlet": key(true) }
+            Portal { target,
+                if stage >= 1 {
+                    div { id: "extra" }
+                }
+                for item in ORDERS[stage] {
+                    div { key: "{item}", id: "item-{item}" }
+                }
+            }
+        }
+    }
+
+    fn expected(harness: &Harness<DioxusDocument>, order: [usize; 3]) -> Vec<NodeId> {
+        let mut nodes = vec![node_id(harness, "#extra")];
+        nodes.extend(order.map(|item| node_id(harness, &format!("#item-{item}"))));
+        nodes
+    }
+
+    let stage = Rc::new(Cell::new(0));
+    let mut harness = with_stage(app, &stage);
+    // Reorders and an insertion before the first item, all inside `#first`.
+    for next in [1, 2] {
+        stage.set(next);
+        rerender(&mut harness);
+        let first = node_id(&harness, "#first");
+        assert_eq!(children(&harness, first), expected(&harness, ORDERS[next]));
+    }
+
+    // The key moves, then moves back with another reorder: the content arrives once, in order.
+    for (next, element, other) in [(3, "#second", "#first"), (4, "#first", "#second")] {
+        stage.set(next);
+        rerender(&mut harness);
+        let element = node_id(&harness, element);
+        assert_eq!(
+            children(&harness, element),
+            expected(&harness, ORDERS[next])
+        );
+        assert_eq!(children(&harness, node_id(&harness, other)), vec![]);
+    }
+}

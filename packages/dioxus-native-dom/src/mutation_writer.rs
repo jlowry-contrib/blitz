@@ -98,9 +98,15 @@ impl<N: Copy + PartialEq> StackState<N> {
         self.owned.as_deref().unwrap_or_default()
     }
 
+    /// Records `nodes` as placed under the root, once each; a node moved within the root is
+    /// already recorded.
     fn own(&mut self, nodes: &[N]) {
         if let Some(owned) = &mut self.owned {
-            owned.extend_from_slice(nodes);
+            for node in nodes {
+                if !owned.contains(node) {
+                    owned.push(*node);
+                }
+            }
         }
     }
 
@@ -536,8 +542,9 @@ impl DioxusState {
                 }
                 (Some(stack), Some(element)) if stack.root != element => {
                     let old = stack.root;
+                    let content = owned_in_order(doc, stack);
                     let mut docm = doc.mutate();
-                    docm.append_children(element, stack.owned());
+                    docm.append_children(element, &content);
                     stack.set_root(element);
                     if docm.parent_id(old).is_none() {
                         docm.remove_and_drop_node(old);
@@ -547,9 +554,10 @@ impl DioxusState {
                     if doc.get_node(stack.root).is_some_and(|n| n.parent.is_some()) =>
                 {
                     // The element is still in the document, but no longer names the key.
+                    let content = owned_in_order(doc, stack);
                     let mut docm = doc.mutate();
                     let parked = docm.create_element(qual_name("div", None), Vec::new());
-                    docm.append_children(parked, stack.owned());
+                    docm.append_children(parked, &content);
                     stack.set_root(parked);
                 }
                 _ => {}
@@ -643,6 +651,19 @@ impl DioxusState {
             buffered.replay(&mut writer);
         }
     }
+}
+
+/// The children of `stack`'s root that the stack placed there, in their DOM order.
+fn owned_in_order(doc: &BaseDocument, stack: &StackState<NodeId>) -> Vec<NodeId> {
+    doc.get_node(stack.root)
+        .map(|root| {
+            root.children
+                .iter()
+                .copied()
+                .filter(|child| stack.owns(*child))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The first element in tree order for each `data-portal-outlet` key in `doc`.
