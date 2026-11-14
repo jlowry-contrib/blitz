@@ -309,8 +309,9 @@ glifo = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4
 vello_common = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4.0-embolden-2049" }
 vello_cpu = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4.0-embolden-2049" }
 vello_gpu = { git = "https://github.com/DioxusLabs/vello", branch = "devin/glifo-0.4.0-embolden-2049" }
-# Vello 0.11.0 with the glass markers, the resumable split fine stage and
-# the external pass hook, from branch glass-0.11 of jlowry-contrib/vello.
+# Vello 0.11.0 with the glass markers, the resumable split fine stage,
+# the external pass hook, and resident images kept across image atlas
+# replacements, from branch glass-0.11 of jlowry-contrib/vello.
 # The crates it publishes together are patched from the same commit. Drop
 # once upstream Vello has an equivalent.
 vello = { git = "https://github.com/jlowry-contrib/vello", rev = "0888e8050ebc398458d9b4564b84055dfaf9b051" }
