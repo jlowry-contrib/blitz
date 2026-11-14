@@ -4,7 +4,11 @@ use crate::{
 };
 use blitz_dom::{BaseDocument, Document, DocumentMutator, Widget};
 use blitz_traits::events::DomEventKind;
-use dioxus_core::{BorrowedAttributeValue, ElementId, WriteMutations};
+use dioxus_core::{BorrowedAttributeValue, ElementId, MultiWriter, RenderTargetId, WriteMutations};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
+use std::rc::Rc;
 use std::str::FromStr as _;
 
 pub(crate) trait RealDom {
@@ -51,6 +55,8 @@ struct StackEntry<N> {
 
 #[derive(Debug)]
 struct StackState<N> {
+    /// The node the stack starts from, mapped to `ElementId::ROOT`
+    root: N,
     stack: Vec<StackEntry<N>>,
     element_to_node: Vec<Option<N>>,
 }
@@ -58,6 +64,7 @@ struct StackState<N> {
 impl<N: Copy> StackState<N> {
     fn new(root: N) -> Self {
         Self {
+            root,
             stack: vec![StackEntry {
                 node: root,
                 element_id: Some(ElementId::ROOT),
@@ -234,27 +241,86 @@ impl<R: RealDom> WriteMutations for StackWriter<'_, R> {
     }
 }
 
+/// The overlay and removal requests that `dioxus-native`'s portal hooks queue for the document.
+///
+/// [`DioxusDocument`](crate::DioxusDocument) provides one as a root context and acts on it
+/// after each render.
+#[derive(Clone, Debug, Default)]
+pub struct PortalHosts(Rc<RefCell<PortalRequests>>);
+
+#[derive(Debug, Default)]
+struct PortalRequests {
+    /// Targets that want an overlay host but don't have one yet
+    overlays: Vec<RenderTargetId>,
+    /// Targets whose owner dropped, to be removed once nothing is mounted in them
+    removals: Vec<RenderTargetId>,
+}
+
+impl PortalHosts {
+    /// Asks the document to host `target` in an overlay appended to `<body>`.
+    pub fn request_overlay(&self, target: RenderTargetId) {
+        self.0.borrow_mut().overlays.push(target);
+    }
+
+    /// Asks the document to remove `target` and its host once nothing is mounted in it.
+    pub fn request_removal(&self, target: RenderTargetId) {
+        self.0.borrow_mut().removals.push(target);
+    }
+
+    fn wants_overlay(&self, target: RenderTargetId) -> bool {
+        self.0.borrow().overlays.contains(&target)
+    }
+
+    pub(crate) fn take_overlays(&self) -> Vec<RenderTargetId> {
+        mem::take(&mut self.0.borrow_mut().overlays)
+    }
+
+    pub(crate) fn take_removals(&self) -> Vec<RenderTargetId> {
+        mem::take(&mut self.0.borrow_mut().removals)
+    }
+}
+
+/// The mutation state of one render target.
+#[derive(Debug, Default)]
+struct TargetState {
+    /// Stack machine state, rooted at the target's host; `None` while the target waits for one
+    stack: Option<StackState<NodeId>>,
+    /// Mutations written by the VirtualDom which have not yet been applied to the document
+    buffered: MutationBuffer,
+    /// Mounted events queued as elements are mounted
+    queued_mounted: Vec<ElementId>,
+}
+
+impl TargetState {
+    fn hosted(host: NodeId) -> Self {
+        Self {
+            stack: Some(StackState::new(host)),
+            ..Self::default()
+        }
+    }
+}
+
 /// The state of the Dioxus integration with the RealDom
 #[derive(Debug)]
 pub struct DioxusState {
-    /// Stack machine state for applying dioxus mutations
-    stack: StackState<NodeId>,
+    /// Each render target's state, ROOT included, replayed in id order
+    targets: BTreeMap<RenderTargetId, TargetState>,
+    /// Requests from the portal hooks
+    portal_hosts: PortalHosts,
+    /// Targets whose writes were dropped since they had no state, each warned about once
+    dropped_targets: BTreeSet<RenderTargetId>,
     /// Count of each handler type (indexed by `DomEventKind` discriminant)
     pub(crate) event_handler_counts: [u32; 64],
-    /// Mounted events queued as elements are mounted
-    pub(crate) queued_mounted_events: Vec<ElementId>,
-    /// Mutations written by the VirtualDom which have not yet been applied to the document
-    pub(crate) buffered_mutations: MutationBuffer,
 }
 
 impl DioxusState {
     /// Initialize the DioxusState in the RealDom
     pub fn create(root_id: NodeId) -> Self {
         Self {
-            stack: StackState::new(root_id),
+            targets: BTreeMap::from([(RenderTargetId::ROOT, TargetState::hosted(root_id))]),
+            portal_hosts: PortalHosts::default(),
+            dropped_targets: BTreeSet::new(),
             event_handler_counts: [0; 64],
-            queued_mounted_events: Vec::new(),
-            buffered_mutations: MutationBuffer::default(),
         }
     }
 
@@ -265,27 +331,120 @@ impl DioxusState {
 
     /// Attempt to convert an ElementId to a NodeId. This will return None if the ElementId is not in the RealDom.
     pub fn try_element_to_node_id(&self, element_id: ElementId) -> Option<NodeId> {
-        self.stack.element_to_node(element_id)
+        self.try_target_element_to_node_id(RenderTargetId::ROOT, element_id)
     }
 
-    /// Apply the buffered dioxus mutations to `doc`, driving the blitz backend
-    /// from the local stack machine.
+    pub(crate) fn try_target_element_to_node_id(
+        &self,
+        target: RenderTargetId,
+        element_id: ElementId,
+    ) -> Option<NodeId> {
+        self.targets
+            .get(&target)?
+            .stack
+            .as_ref()?
+            .element_to_node(element_id)
+    }
+
+    pub(crate) fn portal_hosts(&self) -> &PortalHosts {
+        &self.portal_hosts
+    }
+
+    /// The host of `target`, if it has one.
+    pub(crate) fn host(&self, target: RenderTargetId) -> Option<NodeId> {
+        Some(self.targets.get(&target)?.stack.as_ref()?.root)
+    }
+
+    /// Roots `target` at `host`, keeping any writes buffered while it waited for one.
+    pub(crate) fn set_host(&mut self, target: RenderTargetId, host: NodeId) {
+        self.dropped_targets.remove(&target);
+        self.targets.entry(target).or_default().stack = Some(StackState::new(host));
+    }
+
+    /// Forgets `target`, so its later writes are dropped, and returns its host.
+    pub(crate) fn remove_target(&mut self, target: RenderTargetId) -> Option<NodeId> {
+        let state = self.targets.remove(&target)?;
+        Some(state.stack?.root)
+    }
+
+    /// The target whose host is `node` or its nearest DOM ancestor, or ROOT if none is.
+    pub(crate) fn target_of_node(&self, doc: &BaseDocument, node: NodeId) -> RenderTargetId {
+        if self.targets.len() == 1 {
+            return RenderTargetId::ROOT;
+        }
+        let mut current = Some(node);
+        while let Some(node) = current {
+            let hosted = self.targets.iter().find_map(|(target, state)| {
+                (state.stack.as_ref()?.root == node).then_some(*target)
+            });
+            if let Some(target) = hosted {
+                return target;
+            }
+            current = doc.get_node(node).and_then(|node| node.parent);
+        }
+        RenderTargetId::ROOT
+    }
+
+    /// Takes each target's queued mounted events, ROOT first.
+    pub(crate) fn take_queued_mounted(&mut self) -> Vec<(RenderTargetId, ElementId)> {
+        let mut queued = Vec::new();
+        for (target, state) in &mut self.targets {
+            queued.extend(state.queued_mounted.drain(..).map(|id| (*target, id)));
+        }
+        queued
+    }
+
+    /// Apply the buffered dioxus mutations to `doc`, ROOT first and then each other target in id
+    /// order, driving the blitz backend from each target's stack machine.
     pub(crate) fn apply_buffered_mutations(&mut self, doc: &mut BaseDocument) {
         let Self {
-            stack,
+            targets,
             event_handler_counts,
-            queued_mounted_events,
-            buffered_mutations,
+            ..
         } = self;
-        let mut writer: MutationWriter<'_> = StackWriter::new(
-            stack,
-            BlitzBackend {
-                docm: doc.mutate(),
-                event_handler_counts,
-                queued_mounted_events,
-            },
-        );
-        buffered_mutations.replay(&mut writer);
+        for state in targets.values_mut() {
+            let TargetState {
+                stack: Some(stack),
+                buffered,
+                queued_mounted,
+            } = state
+            else {
+                continue;
+            };
+            let mut writer: MutationWriter<'_> = StackWriter::new(
+                stack,
+                BlitzBackend {
+                    docm: doc.mutate(),
+                    event_handler_counts,
+                    queued_mounted_events: queued_mounted,
+                },
+            );
+            buffered.replay(&mut writer);
+        }
+    }
+}
+
+impl MultiWriter for DioxusState {
+    type Writer = MutationBuffer;
+
+    /// The buffer for `id`. A target nothing hosts or asked to host gets `None`, so its writes
+    /// are dropped.
+    fn writer_for(&mut self, id: RenderTargetId) -> Option<&mut MutationBuffer> {
+        if !self.targets.contains_key(&id) {
+            if !self.portal_hosts.wants_overlay(id) {
+                if self.dropped_targets.insert(id) {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        name: "dioxus_native.portal.unknown_target",
+                        render_target = ?id,
+                        "no host is registered for the render target, so its writes are dropped"
+                    );
+                }
+                return None;
+            }
+            self.targets.insert(id, TargetState::default());
+        }
+        self.targets.get_mut(&id).map(|state| &mut state.buffered)
     }
 }
 

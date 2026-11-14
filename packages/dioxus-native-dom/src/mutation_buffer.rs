@@ -49,7 +49,7 @@ enum BufferedMutation {
 ///
 /// The buffer keeps its allocations when it is replayed so that they are reused by later renders.
 #[derive(Default)]
-pub(crate) struct MutationBuffer {
+pub struct MutationBuffer {
     mutations: Vec<BufferedMutation>,
     /// The concatenated string arguments of `mutations`
     strings: String,

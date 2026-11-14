@@ -19,6 +19,7 @@ pub use dioxus_document::{DioxusDocument, FrameState};
 pub use events::{
     NativePointerData, NativeTouchData, NodeHandle, synthetic_click_event, synthetic_form_event,
 };
+pub use mutation_writer::PortalHosts;
 pub use write_once_attr::{CustomWidgetAttr, SubDocumentAttr};
 
 pub use blitz_dom::NodeId;
