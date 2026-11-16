@@ -1600,6 +1600,8 @@ fn set_input_checked_state(element: &mut ElementData, value: String) {
 
 /// Type that allows mutable access to the viewport
 /// And syncs it back to stylist on drop.
+///
+/// Its colour scheme is the shell's: a colour scheme override applies again on drop.
 pub struct ViewportMut<'doc> {
     doc: &'doc mut BaseDocument,
     initial_viewport: Viewport,
@@ -1607,6 +1609,7 @@ pub struct ViewportMut<'doc> {
 impl ViewportMut<'_> {
     pub fn new(doc: &mut BaseDocument) -> ViewportMut<'_> {
         let initial_viewport = doc.viewport.clone();
+        doc.viewport.color_scheme = doc.shell_color_scheme;
         ViewportMut {
             doc,
             initial_viewport,
@@ -1627,6 +1630,8 @@ impl DerefMut for ViewportMut<'_> {
 }
 impl Drop for ViewportMut<'_> {
     fn drop(&mut self) {
+        self.doc.shell_color_scheme = self.doc.viewport.color_scheme;
+        self.doc.viewport.color_scheme = self.doc.effective_color_scheme();
         if self.doc.viewport == self.initial_viewport {
             return;
         }

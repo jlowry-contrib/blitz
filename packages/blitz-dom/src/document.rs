@@ -25,7 +25,9 @@ use blitz_traits::events::{BlitzPointerId, DomEvent, HitResult, UiEvent};
 use blitz_traits::navigation::{DummyNavigationProvider, NavigationProvider};
 use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::node_id::NodeId;
-use blitz_traits::shell::{DummyShellProvider, FrameTime, ScrollPhysics, ShellProvider, Viewport};
+use blitz_traits::shell::{
+    ColorScheme, DummyShellProvider, FrameTime, ScrollPhysics, ShellProvider, Viewport,
+};
 use cursor_icon::CursorIcon;
 use euclid::SideOffsets2D;
 use linebender_resource_handle::Blob;
@@ -313,7 +315,12 @@ pub struct BaseDocument {
     // Devtool settings. Currently used to render debug overlays
     pub(crate) devtool_settings: DevtoolSettings,
     // Viewport details such as the dimensions, HiDPI scale, and zoom factor,
+    // with the effective colour scheme: the override if set, else the shell's.
     pub(crate) viewport: Viewport,
+    /// The colour scheme the shell last reported, kept apart from the override.
+    pub(crate) shell_color_scheme: ColorScheme,
+    /// A colour scheme set by app code, which takes precedence over the shell's.
+    pub(crate) color_scheme_override: Option<ColorScheme>,
     /// CSS media type used to evaluate `@media` rules.
     pub(crate) media_type: MediaType,
     /// Changes to the stylist [`Device`] that have been requested since the
@@ -595,6 +602,8 @@ impl BaseDocument {
             animations: DocumentAnimationSet::default(),
             snapshots,
             nodes_to_id,
+            shell_color_scheme: viewport.color_scheme,
+            color_scheme_override: None,
             viewport,
             media_type,
             pending_device_changes: DeviceChanges::empty(),
@@ -2275,10 +2284,38 @@ impl BaseDocument {
         true
     }
 
-    pub fn set_viewport(&mut self, viewport: Viewport) {
+    /// Sets the viewport the shell reports. Its colour scheme is recorded as the
+    /// shell's; an override set with [`Self::set_color_scheme_override`] still wins.
+    pub fn set_viewport(&mut self, mut viewport: Viewport) {
+        self.shell_color_scheme = viewport.color_scheme;
+        viewport.color_scheme = self.effective_color_scheme();
         let changes = DeviceChanges::from_viewports(&self.viewport, &viewport);
         self.viewport = viewport;
         self.queue_device_changes(changes);
+    }
+
+    /// Sets a colour scheme from app code that overrides the shell's; `None` follows
+    /// the shell again.
+    ///
+    /// The viewport's `color_scheme` holds the effective scheme, and a change queues a
+    /// restyle for the next resolve.
+    pub fn set_color_scheme_override(&mut self, scheme: Option<ColorScheme>) {
+        self.color_scheme_override = scheme;
+        let effective = self.effective_color_scheme();
+        if self.viewport.color_scheme != effective {
+            self.viewport.color_scheme = effective;
+            self.queue_device_changes(DeviceChanges::COLOR_SCHEME);
+        }
+    }
+
+    /// Returns the colour scheme set from app code, or `None` when the shell's applies.
+    pub fn color_scheme_override(&self) -> Option<ColorScheme> {
+        self.color_scheme_override
+    }
+
+    pub(crate) fn effective_color_scheme(&self) -> ColorScheme {
+        self.color_scheme_override
+            .unwrap_or(self.shell_color_scheme)
     }
 
     /// Returns the current CSS media type used to evaluate `@media` rules.
@@ -3185,6 +3222,80 @@ mod zoom_tests {
         let base = shell_provider.redraw_count.load(Ordering::SeqCst);
         doc.zoom_to(1.0);
         assert!(shell_provider.redraw_count.load(Ordering::SeqCst) > base);
+    }
+}
+
+#[cfg(test)]
+mod color_scheme_override_tests {
+    use super::*;
+
+    fn doc(scheme: ColorScheme) -> BaseDocument {
+        BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, scheme)),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn override_survives_a_viewport_change() {
+        let mut doc = doc(ColorScheme::Light);
+        doc.set_color_scheme_override(Some(ColorScheme::Dark));
+        assert_eq!(doc.viewport().color_scheme, ColorScheme::Dark);
+        assert!(
+            doc.pending_device_changes
+                .contains(DeviceChanges::COLOR_SCHEME)
+        );
+        doc.flush_pending_device_changes();
+
+        doc.set_viewport(Viewport::new(800, 600, 2.0, ColorScheme::Light));
+        assert_eq!(doc.viewport().color_scheme, ColorScheme::Dark);
+        assert!(
+            !doc.pending_device_changes
+                .contains(DeviceChanges::COLOR_SCHEME)
+        );
+
+        doc.viewport_mut().window_size = (640, 480);
+        assert_eq!(doc.viewport().color_scheme, ColorScheme::Dark);
+        assert_eq!(doc.viewport().window_size, (640, 480));
+        assert_eq!(doc.color_scheme_override(), Some(ColorScheme::Dark));
+    }
+
+    #[test]
+    fn none_restores_the_shell_scheme() {
+        let mut doc = doc(ColorScheme::Light);
+        doc.set_color_scheme_override(Some(ColorScheme::Dark));
+        doc.flush_pending_device_changes();
+
+        doc.set_color_scheme_override(None);
+        assert_eq!(doc.viewport().color_scheme, ColorScheme::Light);
+        assert!(
+            doc.pending_device_changes
+                .contains(DeviceChanges::COLOR_SCHEME)
+        );
+        assert_eq!(doc.color_scheme_override(), None);
+    }
+
+    #[test]
+    fn theme_change_under_an_equal_override_then_none_restores_it() {
+        let mut doc = doc(ColorScheme::Light);
+        doc.set_color_scheme_override(Some(ColorScheme::Light));
+        doc.flush_pending_device_changes();
+
+        // The shell's theme changes, as `ThemeChanged` writes it.
+        doc.viewport_mut().color_scheme = ColorScheme::Dark;
+        assert_eq!(doc.viewport().color_scheme, ColorScheme::Light);
+        assert!(
+            !doc.pending_device_changes
+                .contains(DeviceChanges::COLOR_SCHEME)
+        );
+        assert_eq!(doc.viewport_mut().color_scheme, ColorScheme::Dark);
+
+        doc.set_color_scheme_override(None);
+        assert_eq!(doc.viewport().color_scheme, ColorScheme::Dark);
+        assert!(
+            doc.pending_device_changes
+                .contains(DeviceChanges::COLOR_SCHEME)
+        );
     }
 }
 
