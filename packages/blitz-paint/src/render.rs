@@ -263,6 +263,20 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         Some(built.shape)
     }
 
+    /// Whether the `clip-path` in `styles` gives the glass drawn from `props` its shape, in a
+    /// border box `frame`, so that it must not also clip that glass.
+    ///
+    /// It does when it is a basic shape and the morph overrides don't replace it.
+    fn clip_shapes_glass(
+        &self,
+        styles: &ComputedValues,
+        frame: &CssBox,
+        props: &GlassProps,
+    ) -> bool {
+        props.geometry.is_none()
+            && clip_path::glass_clip(styles.get_clip_path(), frame, self.scale).is_some()
+    }
+
     /// The glass groups `node` emits.
     ///
     /// A lone glass element groups only itself. A glass container groups its own glass, if any,
@@ -304,11 +318,17 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 (Some(group), Some(props)) => self.backdrop(node, props, group),
                 _ => None,
             };
+            let own_outside_clip = own.is_some()
+                && own_props.as_ref().is_some_and(|props| {
+                    node.primary_styles()
+                        .is_some_and(|styles| self.clip_shapes_glass(&styles, frame, props))
+                });
             return GlassGroups {
                 own,
                 inner: None,
                 draws_own,
                 portal,
+                own_outside_clip,
             };
         };
         if let Some(props) = &own_props
@@ -332,14 +352,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 own,
                 inner: group_of(members, node.id.as_u64() | CLIPPED_MEMBERS_ID_BIT, spacing),
                 draws_own,
-                portal: None,
+                ..GlassGroups::default()
             }
         } else {
             GlassGroups {
                 own: group_of(members, node.id.as_u64(), spacing),
-                inner: None,
                 draws_own,
-                portal: None,
+                ..GlassGroups::default()
             }
         }
     }
@@ -543,7 +562,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     /// It skips what doesn't paint and nested containers. Glass under a layer between it and
     /// the container (opacity, filter, clip-path, mask, blend, isolation, CSS `clip`, an
     /// overflow clip or a backdrop-filter) stays out, and so does glass whose own layer would
-    /// hold it, so each draws as a lone group inside its layers.
+    /// hold it, so each draws as a lone group inside its layers. A clip-path that gives the
+    /// glass its shape doesn't hold it, but holds the glass of its subtree.
     fn collect_glass(
         &self,
         node_id: NodeId,
@@ -568,19 +588,22 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         {
             return;
         }
+        let own = (!node.is_inline_with_only_block_children() && node.has_glass())
+            .then(|| node.glass_props())
+            .flatten()
+            .map(|props| (self.css_box(node, &styles, node.final_layout()), props));
+        let clip_shapes = own
+            .as_ref()
+            .is_some_and(|(frame, props)| self.clip_shapes_glass(&styles, frame, props));
         // A nested container groups its own subtree when it paints, and a layer over the
         // node's own glass holds the glass of its subtree too.
-        if node.glass_container().is_some() || self.layers_own_glass(node, &styles) {
+        if node.glass_container().is_some() || self.layers_own_glass(&styles, clip_shapes) {
             return;
         }
 
         let transform = self.node_transform(node, parent_transform);
         let mut collected = false;
-        if !node.is_inline_with_only_block_children()
-            && node.has_glass()
-            && let Some(props) = node.glass_props()
-        {
-            let frame = self.css_box(node, &styles, node.final_layout());
+        if let Some((frame, props)) = own {
             let id = members.len() as u32;
             if let Some(shape) = self.glass_shape(node, &frame, transform, &props, id) {
                 self.ignore_backdrop(node, &props);
@@ -590,10 +613,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             }
         }
 
-        // The overflow clip and a kept backdrop-filter layer hold only what the node paints
-        // after its own glass would.
+        // The overflow clip, a kept backdrop-filter layer and a clip-path that shapes the glass
+        // hold only what the node paints after its own glass would.
         let backdrop_layer = !collected && !styles.get_effects().backdrop_filter.0.is_empty();
-        if self.should_clip_node(node, &styles) || backdrop_layer {
+        if self.should_clip_node(node, &styles) || backdrop_layer || clip_shapes {
             return;
         }
         let children_transform = self.scrolled_transform(node, transform);
@@ -604,12 +627,24 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
     /// Whether painting `node` pushes a layer around everything it paints, its own glass
     /// included: opacity, filter, clip-path, mask, blend, isolation or CSS `clip`.
-    fn layers_own_glass(&self, node: &Node, styles: &ComputedValues) -> bool {
+    ///
+    /// A clip-path that shapes the node's glass, `clip_shapes`, clips only what the node
+    /// paints after that glass, so it isn't such a layer.
+    fn layers_own_glass(&self, styles: &ComputedValues, clip_shapes: bool) -> bool {
         use style::computed_values::position::T as Position;
+        use style::values::computed::basic_shape::ClipPath;
         use style::values::generics::ClipRectOrAuto;
+        use style::values::generics::image::GenericImage;
 
         let effects = styles.get_effects();
-        node.applies_atomic_paint_effect()
+        // The tests of `Node::applies_atomic_paint_effect`, which counts every clip-path.
+        let clip_layer = !clip_shapes && !matches!(styles.get_clip_path(), ClipPath::None);
+        let mask = (styles.get_svg().mask_image.0.iter())
+            .any(|image| !matches!(image, GenericImage::None));
+        effects.opacity != 1.0
+            || !effects.filter.0.is_empty()
+            || clip_layer
+            || mask
             || styles.get_box().isolation == Isolation::Isolate
             || convert_blend_mode(effects.mix_blend_mode) != BlendMode::default()
             || (matches!(
@@ -1133,10 +1168,15 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             cx.draw_outset_box_shadow(scene);
         }
 
+        // A clip-path that shapes the element's own glass clips only what follows that glass.
+        // CSS clips after filtering, so a filter keeps the clip around everything.
+        let clip_after_glass =
+            has_clip_path && glass.own_outside_clip && effects.filter.0.is_empty();
+
         // clip-path clip ayer
         self.layer_manager.maybe_with_layer(
             scene,
-            has_clip_path,
+            has_clip_path && !clip_after_glass,
             BlendMode::default(),
             1.0,
             cx.transform,
@@ -1194,6 +1234,17 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             }
                             self.draw_glass(scene, group);
                         }
+                        // Opacity and a mask commute with the clip, so it may open inside them.
+                        let clip_pushed = self.layer_manager.maybe_push_layer(
+                            scene,
+                            clip_after_glass,
+                            BlendMode::default(),
+                            1.0,
+                            cx.transform,
+                            &clip_path_for_layer,
+                            None,
+                            None,
+                        );
                         if paints_own_box {
                             cx.draw_background(scene);
                             cx.draw_inset_box_shadow(scene);
@@ -1256,6 +1307,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             cx.transform = unscrolled_transform;
                             cx.draw_scrollbars(scene);
                         }
+                        self.layer_manager.maybe_pop_layer(scene, clip_pushed);
                     },
                 );
 
@@ -1357,6 +1409,9 @@ struct GlassGroups {
     draws_own: bool,
     /// The portal source re-painted under `own`, for a lone glass element.
     portal: Option<NodeId>,
+    /// Whether `own` is a lone element's glass shaped by its clip-path, which then clips only
+    /// what the element paints after it.
+    own_outside_clip: bool,
 }
 
 /// The group of `members`, in order, with every pair that shares a union; `None` when empty.

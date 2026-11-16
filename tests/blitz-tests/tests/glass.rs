@@ -1196,24 +1196,152 @@ fn circle_clip_path_gives_an_ellipse() {
         shape.kind,
         ShapeKind::Ellipse(Rect::new(30.0, 0.0, 70.0, 40.0))
     );
-    // The glass sits inside the clip-path layer, in its usual place before the background.
+    // The glass draws outside the clip-path layer, which opens after it for the background.
+    let (plain, _) = clipped("");
     let glass = glass_index(&scene);
-    let clip = scene.commands[..glass]
-        .iter()
-        .rposition(|cmd| {
-            matches!(
-                cmd,
-                RenderCommand::PushLayer(_) | RenderCommand::PushClipLayer(_)
-            )
-        })
-        .expect("no clip-path layer");
-    assert_eq!(depth_at(&scene, glass), depth_at(&scene, clip) + 1);
-    assert_eq!(glass + 1, fill_index(&scene, BLUE), "{:#?}", scene.commands);
+    assert_eq!(
+        depth_at(&scene, glass),
+        depth_at(&plain, glass_index(&plain))
+    );
+    let blue = fill_index(&scene, BLUE);
+    assert!(next_push(&scene, glass) < blue, "{:#?}", scene.commands);
+    assert_eq!(depth_at(&scene, blue), depth_at(&scene, glass) + 1);
 
     let (_, shape) = clipped("clip-path:ellipse(20px 10px at 30px 20px)");
     assert_eq!(
         shape.kind,
         ShapeKind::Ellipse(Rect::new(10.0, 10.0, 50.0, 30.0))
+    );
+}
+
+/// The index of the first layer pushed after the command at `index`.
+fn next_push(scene: &Scene, index: usize) -> usize {
+    let after = &scene.commands[index + 1..];
+    index
+        + 1
+        + after
+            .iter()
+            .position(|cmd| {
+                matches!(
+                    cmd,
+                    RenderCommand::PushLayer(_) | RenderCommand::PushClipLayer(_)
+                )
+            })
+            .expect("no layer pushed")
+}
+
+/// A triangle `clip-path` inside a 100×40 box.
+const TRIANGLE: &str = "clip-path:path(\"M10 5 L90 5 L50 35 Z\")";
+
+#[test]
+fn clip_path_glass_shadow_is_not_clipped() {
+    let (plain, _) = clipped("");
+    let base = depth_at(&plain, glass_index(&plain));
+    for clip in [
+        "clip-path:circle(closest-side)",
+        "clip-path:inset(5px round 6px)",
+        TRIANGLE,
+    ] {
+        let (scene, _) = clipped(clip);
+        let glass = glass_index(&scene);
+        assert_eq!(depth_at(&scene, glass), base, "{clip}");
+        let blue = fill_index(&scene, BLUE);
+        assert!(next_push(&scene, glass) < blue, "{clip}");
+        assert_eq!(depth_at(&scene, blue), base + 1, "{clip}");
+    }
+
+    // Under opacity, the clip layer opens inside the effect layer, after the glass.
+    let (plain, _) = clipped("opacity:0.5");
+    let base = depth_at(&plain, glass_index(&plain));
+    let (scene, _) = clipped(&format!("opacity:0.5; {TRIANGLE}"));
+    let glass = glass_index(&scene);
+    assert_eq!(depth_at(&scene, glass), base, "{:#?}", scene.commands);
+    assert_eq!(depth_at(&scene, fill_index(&scene, BLUE)), base + 1);
+}
+
+#[test]
+fn overrides_and_filters_keep_the_clip_around_the_glass() {
+    let overrides = "--glass-x:50px; --glass-y:20px; --glass-w:40px; --glass-h:20px";
+    for extra in [overrides, "filter:blur(1px)"] {
+        let (plain, _) = clipped(extra);
+        let base = depth_at(&plain, glass_index(&plain));
+        let (scene, _) = clipped(&format!("{extra}; {TRIANGLE}"));
+        assert_eq!(depth_at(&scene, glass_index(&scene)), base + 1, "{extra}");
+    }
+
+    // With the overrides, the clip path doesn't shape the glass, so it still holds it.
+    let mut doc = doc(&format!(
+        "<div id='c' style='--glass-container:4px; display:flex'>{}\
+         <div id='p' style='width:100px; height:40px; --glass:regular; {overrides}; \
+         {TRIANGLE}'></div></div>",
+        glass_box(40, "", "0000ff"),
+    ));
+    let scene = record(&mut doc);
+    let groups = groups(&scene);
+    assert_eq!(groups.len(), 2, "{groups:#?}");
+    assert_eq!(groups[0].id, Some(node_id(&doc, "#c").as_u64()));
+    assert_eq!(groups[0].shapes.len(), 1);
+    assert_eq!(groups[1].id, Some(node_id(&doc, "#p").as_u64()));
+}
+
+#[test]
+fn clip_path_glass_joins_its_container_group() {
+    let mut doc = doc(&format!(
+        "<div id='c' style='--glass-container:4px; display:flex'>{}\
+         <div style='width:100px; height:40px; --glass:regular; background:#00ff00; \
+         {TRIANGLE}'></div></div>",
+        glass_box(40, "", "0000ff"),
+    ));
+    let scene = record(&mut doc);
+
+    let groups = groups(&scene);
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    assert_eq!(groups[0].id, Some(node_id(&doc, "#c").as_u64()));
+    let shapes = &groups[0].shapes;
+    assert_eq!(shapes.len(), 2);
+    let ShapeKind::Path(path) = &shapes[1].kind else {
+        panic!("{:?}", shapes[1].kind)
+    };
+    assert_eq!(path.bounding_box(), Rect::new(10.0, 5.0, 90.0, 35.0));
+    assert_eq!(shapes[1].transform.translation(), Vec2::new(40.0, 0.0));
+
+    // The member paints only its content, inside its clip-path layer.
+    let group = glass_index(&scene);
+    let green = fill_index(&scene, GREEN);
+    assert!(group < green);
+    assert_eq!(depth_at(&scene, green), depth_at(&scene, group) + 1);
+}
+
+#[test]
+fn clip_path_still_clips_the_element_s_children() {
+    let circle = "clip-path:circle(closest-side)";
+    let scene = scene_for(&format!(
+        "<div style='width:100px; height:40px; --glass:regular; {circle}'>\
+         <div style='width:10px; height:10px; background:#00ff00'></div></div>"
+    ));
+    let glass = glass_index(&scene);
+    let green = fill_index(&scene, GREEN);
+    assert!(next_push(&scene, glass) < green);
+    assert_eq!(depth_at(&scene, green), depth_at(&scene, glass) + 1);
+
+    // A member's glass child stays out of the group, as a lone group inside the clip.
+    let mut doc = doc(&format!(
+        "<div id='c' style='--glass-container:4px; display:flex'>{}\
+         <div style='width:100px; height:40px; --glass:regular; {circle}'>\
+         <div id='k' style='width:20px; height:20px; --glass:regular'></div></div></div>",
+        glass_box(40, "", "0000ff"),
+    ));
+    let scene = record(&mut doc);
+    let groups = groups(&scene);
+    assert_eq!(groups.len(), 2, "{groups:#?}");
+    let container = node_id(&doc, "#c").as_u64();
+    assert_eq!(groups[0].id, Some(container));
+    assert_eq!(sizes(groups[0]), [(0, 40.0), (1, 40.0)]);
+    let child = node_id(&doc, "#k").as_u64();
+    assert_eq!(groups[1].id, Some(child));
+    assert_eq!(
+        depth_at(&scene, group_index(&scene, child)),
+        depth_at(&scene, group_index(&scene, container)) + 1
     );
 }
 
