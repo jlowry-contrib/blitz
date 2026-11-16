@@ -2,17 +2,28 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use anyrender_vello::glass::{Accessibility, Appearance, FrameInputs};
+use anyrender_vello::glass::{Accessibility, AdaptStart, Appearance, FrameInputs};
 use blitz_traits::shell::ColorScheme;
 
-/// A shared handle to the accessibility settings the glass backend reads each frame.
-#[derive(Clone, Debug, Default)]
+/// A shared handle to the accessibility settings and adapt-start mode the glass backend reads.
+#[derive(Clone, Debug)]
 pub struct GlassInputs {
     accessibility: Arc<Mutex<Accessibility>>,
+    adapt_start: Arc<Mutex<AdaptStart>>,
+}
+
+impl Default for GlassInputs {
+    /// Creates inputs with every accessibility setting off, adapting live.
+    fn default() -> Self {
+        Self {
+            accessibility: Arc::default(),
+            adapt_start: Arc::new(Mutex::new(AdaptStart::Live)),
+        }
+    }
 }
 
 impl GlassInputs {
-    /// Creates inputs with every accessibility setting off.
+    /// Creates inputs with every accessibility setting off, adapting live.
     pub fn new() -> Self {
         Self::default()
     }
@@ -32,6 +43,22 @@ impl GlassInputs {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// Sets when adaptive glass decides its look, as seen by every clone of this handle.
+    pub fn set_adapt_start(&self, adapt_start: AdaptStart) {
+        *self
+            .adapt_start
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = adapt_start;
+    }
+
+    /// Returns when adaptive glass decides its look.
+    pub fn adapt_start(&self) -> AdaptStart {
+        *self
+            .adapt_start
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Builds the glass backend's inputs for one frame; a dark scheme gives the dark appearance.
@@ -48,6 +75,7 @@ pub(crate) fn frame_inputs(
     FrameInputs::new(time, scale)
         .with_appearance(appearance)
         .with_accessibility(inputs.accessibility())
+        .with_adapt_start(inputs.adapt_start())
 }
 
 #[cfg(test)]
@@ -79,10 +107,28 @@ mod tests {
     }
 
     #[test]
+    fn glass_inputs_carry_adapt_start_into_the_frame() {
+        let inputs = GlassInputs::new();
+        assert_eq!(inputs.adapt_start(), AdaptStart::Live);
+        let clone = inputs.clone();
+        for mode in [
+            AdaptStart::AppearanceOnly,
+            AdaptStart::SettledAtMount,
+            AdaptStart::Live,
+        ] {
+            clone.set_adapt_start(mode);
+            assert_eq!(inputs.adapt_start(), mode);
+            let frame = frame_inputs(1.0, 3.0, ColorScheme::Light, &inputs);
+            assert_eq!(frame.adapt_start, mode);
+        }
+    }
+
+    #[test]
     fn default_inputs_are_light_with_no_accessibility() {
         let frame = frame_inputs(0.0, 1.0, ColorScheme::default(), &GlassInputs::default());
         assert_eq!(frame, FrameInputs::new(0.0, 1.0));
         assert_eq!(frame.appearance, Appearance::Light);
         assert_eq!(frame.accessibility, Accessibility::new());
+        assert_eq!(frame.adapt_start, AdaptStart::Live);
     }
 }
