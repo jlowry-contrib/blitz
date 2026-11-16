@@ -29,10 +29,11 @@ pub use dioxus_stores::{self, GlobalStore, ReadStore, Store, WriteStore, store, 
 #[cfg(feature = "vello")]
 pub use crate::GlassInputs;
 pub use crate::{
-    FrameClock, FrameTime, Portal, Presented, RenderTargetId, SafeArea, ScrollPhysics, TimeSource,
-    pointer_time_stamp, request_animation_frame, touch_time_stamp, use_frame_clock, use_frame_time,
-    use_portal_outlet, use_portal_target,
+    ColorSchemeOverride, FrameClock, FrameTime, Portal, Presented, RenderTargetId, SafeArea,
+    ScrollPhysics, TimeSource, pointer_time_stamp, request_animation_frame, touch_time_stamp,
+    use_frame_clock, use_frame_time, use_portal_outlet, use_portal_target,
 };
+pub use blitz_traits::shell::ColorScheme;
 
 // Document and History
 pub use dioxus_document::{self as document, Meta, Stylesheet, Title};

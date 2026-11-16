@@ -1,5 +1,6 @@
 use anyrender::CompositeAlphaMode;
 use blitz_dom::FontContext;
+use blitz_traits::shell::ColorScheme;
 use dioxus_core::LaunchConfig;
 use peniko::Color;
 use winit::window::WindowAttributes;
@@ -8,7 +9,7 @@ use winit::window::WindowAttributes;
 use crate::GlassInputs;
 use crate::KeyboardShortcut;
 use crate::assets::AssetHandler;
-use crate::{SafeArea, ScrollPhysics, TimeSource};
+use crate::{DioxusDocument, SafeArea, ScrollPhysics, TimeSource};
 
 /// Launch-time configuration for a dioxus-native application.
 pub struct Config {
@@ -26,6 +27,7 @@ pub struct Config {
     pub(crate) glass_inputs: Option<GlassInputs>,
     pub(crate) safe_area: SafeArea,
     pub(crate) scroll_physics: ScrollPhysics,
+    pub(crate) color_scheme: Option<ColorScheme>,
 }
 
 impl LaunchConfig for Config {}
@@ -67,6 +69,7 @@ impl Default for Config {
             glass_inputs: None,
             safe_area: SafeArea::default(),
             scroll_physics: ScrollPhysics::default(),
+            color_scheme: None,
         }
     }
 }
@@ -186,6 +189,22 @@ impl Config {
         self.scroll_physics = scroll_physics;
         self
     }
+
+    /// Set the document's colour scheme from launch, over the one the shell reports.
+    ///
+    /// App code changes it later through [`ColorSchemeOverride`](crate::ColorSchemeOverride).
+    pub fn with_color_scheme(mut self, scheme: ColorScheme) -> Self {
+        self.color_scheme = Some(scheme);
+        self
+    }
+}
+
+/// Seeds the document's colour scheme override with the launch's, before the shell's
+/// first viewport reaches it.
+pub(crate) fn seed_color_scheme(doc: &mut DioxusDocument, scheme: Option<ColorScheme>) {
+    if let Some(scheme) = scheme {
+        doc.set_color_scheme(Some(scheme));
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +235,33 @@ mod tests {
                 .with_devtools_shortcuts([])
                 .devtools_shortcuts
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn config_scheme_survives_the_shell_viewport() {
+        use crate::DocumentConfig;
+        use blitz_traits::shell::Viewport;
+        use dioxus_core::{Element, VNode, VirtualDom};
+
+        fn app() -> Element {
+            VNode::empty()
+        }
+
+        let config = Config::new().with_color_scheme(ColorScheme::Dark);
+        let mut doc = DioxusDocument::new(VirtualDom::new(app), DocumentConfig::default());
+        seed_color_scheme(&mut doc, config.color_scheme);
+        // `View::init` hands the document the shell's viewport.
+        doc.inner
+            .borrow_mut()
+            .set_viewport(Viewport::new(800, 600, 2.0, ColorScheme::Light));
+        assert_eq!(
+            doc.inner.borrow().viewport().color_scheme,
+            ColorScheme::Dark
+        );
+        assert_eq!(
+            doc.color_scheme_override().scheme(),
+            Some(ColorScheme::Dark)
         );
     }
 

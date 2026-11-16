@@ -236,7 +236,7 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
     let navigation_provider = Some(Arc::new(DioxusNativeNavigationProvider) as _);
 
     // Create document + window from the baked virtualdom
-    let doc = DioxusDocument::new(
+    let mut doc = DioxusDocument::new(
         vdom,
         DocumentConfig {
             net_provider: Some(net_provider),
@@ -248,6 +248,9 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
             ..Default::default()
         },
     );
+    // Before `View::init`, whose `set_viewport` keeps the override, so the first paint
+    // and frame hook are already in the launch's scheme.
+    config::seed_color_scheme(&mut doc, config.color_scheme);
     #[cfg(any(feature = "vello", feature = "vello-hybrid"))]
     let renderer = DioxusNativeWindowRenderer::with_options(RendererOptions {
         base_color: config.base_color,
