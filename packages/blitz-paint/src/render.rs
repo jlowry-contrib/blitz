@@ -26,8 +26,8 @@ use anyrender::glass::{BackdropSource, GlassGroup, GlassShape};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::glass::{CornerStyleProp, GlassProps};
 use blitz_dom::node::{
-    ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
-    TextNodeData,
+    ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, SpecialElementData,
+    TextInputData, TextNodeData,
 };
 use blitz_dom::{BaseDocument, ElementData, Node, NodeId, local_name};
 use blitz_traits::devtools::DevtoolSettings;
@@ -1172,6 +1172,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // CSS clips after filtering, so a filter keeps the clip around everything.
         let clip_after_glass =
             has_clip_path && glass.own_outside_clip && effects.filter.0.is_empty();
+        // With nothing painted after the glass the clip has nothing to clip, and an empty
+        // layer would still round what lies under it to Vello's 8-bit blend stack.
+        let push_clip_after_glass = clip_after_glass && !cx.paints_only_glass();
 
         // clip-path clip ayer
         self.layer_manager.maybe_with_layer(
@@ -1237,7 +1240,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                         // Opacity and a mask commute with the clip, so it may open inside them.
                         let clip_pushed = self.layer_manager.maybe_push_layer(
                             scene,
-                            clip_after_glass,
+                            push_clip_after_glass,
                             BlendMode::default(),
                             1.0,
                             cx.transform,
@@ -1497,6 +1500,37 @@ fn convert_rect(rect: &parley::BoundingBox) -> kurbo::Rect {
 }
 
 impl ElementCx<'_, '_> {
+    /// Whether the element paints nothing after its own glass: no background, inset shadow
+    /// or border, no content or children of its own, and no layout overlay.
+    fn paints_only_glass(&self) -> bool {
+        use style::values::generics::image::GenericImage;
+
+        let background = self.style.get_background();
+        let background_color = (background.background_color)
+            .resolve_to_absolute(&self.style.clone_color())
+            .as_srgb_color();
+        let no_children = self.node.children.is_empty()
+            && (self.node.paint_children.borrow().as_ref())
+                .is_none_or(|children| children.is_empty());
+        #[cfg(feature = "svg")]
+        let no_svg = self.svg.is_none();
+        #[cfg(not(feature = "svg"))]
+        let no_svg = true;
+        no_children
+            && no_svg
+            && self.element.before.is_none()
+            && self.element.after.is_none()
+            && self.element.inline_layout_data.is_none()
+            && matches!(self.element.special_data, SpecialElementData::None)
+            && self.list_item.is_none()
+            && !self.devtools.show_layout
+            && background_color == Color::TRANSPARENT
+            && (background.background_image.0.iter())
+                .all(|image| matches!(image, GenericImage::None))
+            && self.frame.border_width == Insets::ZERO
+            && !(self.style.get_effects().box_shadow.0.iter()).any(|shadow| shadow.inset)
+    }
+
     /// Paint overlay scrollbar thumbs for scroll containers: `overflow:
     /// scroll`, or `auto` when the content overflows (never `hidden`/`clip`,
     /// which scroll only programmatically). Thumbs appear on scroll and fade

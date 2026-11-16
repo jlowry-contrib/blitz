@@ -1260,6 +1260,31 @@ fn clip_path_glass_shadow_is_not_clipped() {
 }
 
 #[test]
+fn clip_path_glass_with_nothing_after_it_pushes_no_clip() {
+    let pushes = |scene: &Scene| {
+        (scene.commands.iter())
+            .filter(|cmd| {
+                matches!(
+                    cmd,
+                    RenderCommand::PushLayer(_) | RenderCommand::PushClipLayer(_)
+                )
+            })
+            .count()
+    };
+    let bare = |extra: &str| {
+        scene_for(&format!(
+            "<div style='width:100px; height:40px; --glass:regular; {extra}'></div>"
+        ))
+    };
+    let plain = pushes(&bare(""));
+    for clip in ["clip-path:circle(closest-side)", TRIANGLE] {
+        let scene = bare(clip);
+        assert_eq!(groups(&scene).len(), 1, "{clip}");
+        assert_eq!(pushes(&scene), plain, "{clip}: {:#?}", scene.commands);
+    }
+}
+
+#[test]
 fn overrides_and_filters_keep_the_clip_around_the_glass() {
     let overrides = "--glass-x:50px; --glass-y:20px; --glass-w:40px; --glass-h:20px";
     for extra in [overrides, "filter:blur(1px)"] {
