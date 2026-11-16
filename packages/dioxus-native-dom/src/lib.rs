@@ -9,12 +9,14 @@
 //!  - `menu`: Enables the [`muda`](https://docs.rs/muda/latest/muda/) menubar.
 //!  - `tracing`: Enables tracing support.
 
+mod color_scheme;
 mod dioxus_document;
 mod events;
 mod mutation_buffer;
 mod mutation_writer;
 mod write_once_attr;
 pub use blitz_dom::DocumentConfig;
+pub use color_scheme::ColorSchemeOverride;
 pub use dioxus_document::{DioxusDocument, FrameState};
 pub use events::{
     NativePointerData, NativeTouchData, NodeHandle, synthetic_click_event, synthetic_form_event,

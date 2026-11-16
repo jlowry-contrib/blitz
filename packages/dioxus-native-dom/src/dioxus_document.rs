@@ -1,5 +1,6 @@
 //! Integration between Dioxus and Blitz
 use crate::NodeId;
+use crate::color_scheme::ColorSchemeOverride;
 use crate::events::{
     BlitzKeyboardData, NativeConverter, NativeFocusData, NativeFormData, NativePointerData,
     NativeScrollData, NativeTouchData, NativeWheelData, NodeHandle,
@@ -11,7 +12,7 @@ use blitz_dom::{
     EventHandler, Node,
 };
 use blitz_traits::events::{DomEvent, DomEventData, EventState, UiEvent};
-use blitz_traits::shell::FrameTime;
+use blitz_traits::shell::{ColorScheme, FrameTime};
 use dioxus_core::{ElementId, Event, RenderTargetId, ScopeId, VirtualDom};
 use dioxus_html::{PlatformEventData, set_event_converter};
 use dioxus_signals::{ReadSignal, ReadableExt, Signal, WritableExt};
@@ -99,6 +100,7 @@ pub struct DioxusDocument {
     pub vdom: VirtualDom,
     pub vdom_state: DioxusState,
     frame_state: FrameState,
+    color_scheme: ColorSchemeOverride,
     /// Targets whose owners dropped, removed once nothing is mounted in them
     pending_removals: Vec<RenderTargetId>,
 
@@ -165,12 +167,15 @@ impl DioxusDocument {
             time: vdom.in_scope(ScopeId::ROOT, || Signal::new(FrameTime::default())),
             requested: Rc::new(Cell::new(false)),
         };
+        let color_scheme = ColorSchemeOverride::default();
         vdom.provide_root_context(frame_state.clone());
+        vdom.provide_root_context(color_scheme.clone());
         vdom.provide_root_context(vdom_state.portal_hosts().clone());
         Self {
             vdom,
             vdom_state,
             frame_state,
+            color_scheme,
             pending_removals: Vec::new(),
             inner: Rc::new(RefCell::new(doc)),
             html_element_id,
@@ -180,12 +185,35 @@ impl DioxusDocument {
         }
     }
 
+    /// Returns the handle app code uses to set the document's colour scheme.
+    pub fn color_scheme_override(&self) -> &ColorSchemeOverride {
+        &self.color_scheme
+    }
+
+    /// Sets the document's colour scheme at once, as app code would through the handle.
+    pub fn set_color_scheme(&mut self, scheme: Option<ColorScheme>) {
+        self.color_scheme.set(scheme);
+        self.apply_color_scheme();
+    }
+
+    /// Applies a colour scheme set through the handle since the last call; returns whether
+    /// there was one.
+    fn apply_color_scheme(&mut self) -> bool {
+        let Some(scheme) = self.color_scheme.take_pending() else {
+            return false;
+        };
+        self.inner.borrow_mut().set_color_scheme_override(scheme);
+        true
+    }
+
     /// Run an initial build of the Dioxus vdom
     pub fn initial_build(&mut self) {
         // Mutations are buffered and only applied once the vdom has finished running. This means
         // that the document is not borrowed while user code (which may access it) is running.
         self.vdom.rebuild(&mut self.vdom_state);
         self.apply_render();
+        // A scheme set at mount reaches the first resolve.
+        self.apply_color_scheme();
     }
 
     /// Hosts the overlays requested during the render, applies its mutations, fires its mounted
@@ -360,21 +388,26 @@ impl Document for DioxusDocument {
         // their own (e.g. JavaScript timers)
         let subdoc_changes = self.inner.borrow_mut().poll_subdocuments(Some(&waker));
 
-        {
+        let has_work = {
             let fut = self.vdom.wait_for_work();
             let mut pinned_fut = pin!(fut);
 
             let mut cx = TaskContext::from_waker(&waker);
-            match pinned_fut.as_mut().poll(&mut cx) {
-                std::task::Poll::Ready(_) => {}
-                std::task::Poll::Pending => return subdoc_changes,
-            }
+            pinned_fut.as_mut().poll(&mut cx).is_ready()
+        };
+        // A scheme set in an event handler, or by an effect or task that polling the vdom ran,
+        // which may leave the vdom no work.
+        let scheme_changed = self.apply_color_scheme();
+        if !has_work {
+            return subdoc_changes || scheme_changed;
         }
 
         // Mutations are buffered and only applied once the vdom has finished running. This means
         // that the document is not borrowed while user code (which may access it) is running.
         self.vdom.render_immediate(&mut self.vdom_state);
         self.apply_render();
+        // A scheme set by this render or its effects reaches the same frame.
+        self.apply_color_scheme();
 
         true
     }
@@ -542,6 +575,9 @@ mod tests {
     use dioxus_core::ScopeId;
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+
+    use blitz_traits::shell::{ColorScheme, Viewport};
+    use keyboard_types::Modifiers;
 
     #[test]
     // Regression test for a panic. The keyed `div`s are re-ordered as the (unordered) `HashMap` grows,
@@ -1014,5 +1050,108 @@ mod tests {
         assert!(is_err(
             mounted.scroll(Default::default(), ScrollBehavior::Instant)
         ));
+    }
+
+    fn light_config() -> DocumentConfig {
+        DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        }
+    }
+
+    fn click(doc: &mut DioxusDocument, selector: &str) {
+        doc.inner.borrow_mut().resolve(0.0);
+        let event = {
+            let inner = doc.inner.borrow();
+            let id = inner.query_selector(selector).unwrap().unwrap();
+            let data = inner
+                .get_node(id)
+                .unwrap()
+                .synthetic_click_event(Modifiers::empty());
+            DomEvent::new(id, data)
+        };
+        let handler = DioxusEventHandler {
+            vdom: &mut doc.vdom,
+            vdom_state: &mut doc.vdom_state,
+        };
+        EventDriver::new(&mut doc.inner, handler).handle_dom_event(event);
+    }
+
+    /// The scheme the frame hook would read after this frame's poll and resolve.
+    fn resolved_scheme(doc: &DioxusDocument) -> ColorScheme {
+        doc.inner.borrow_mut().resolve(0.0);
+        doc.inner.borrow().viewport().color_scheme
+    }
+
+    #[test]
+    fn scheme_set_in_a_handler_reaches_the_viewport_on_the_next_poll() {
+        fn app() -> Element {
+            let scheme = use_context::<ColorSchemeOverride>();
+            rsx!(
+                button {
+                    id: "btn",
+                    onclick: move |_| scheme.set(Some(ColorScheme::Dark)),
+                    "dark"
+                }
+            )
+        }
+
+        let mut doc = DioxusDocument::new(VirtualDom::new(app), light_config());
+        doc.initial_build();
+        poll_until_idle(&mut doc);
+        assert_eq!(resolved_scheme(&doc), ColorScheme::Light);
+
+        click(&mut doc, "#btn");
+        assert!(doc.poll(None));
+        assert_eq!(resolved_scheme(&doc), ColorScheme::Dark);
+        assert!(!doc.poll(None));
+    }
+
+    #[test]
+    fn scheme_set_in_an_effect_reaches_the_viewport_in_the_same_poll() {
+        fn app() -> Element {
+            let scheme = use_context::<ColorSchemeOverride>();
+            let mut dark = use_signal(|| false);
+            use_effect(move || {
+                if dark() {
+                    scheme.set(Some(ColorScheme::Dark));
+                }
+            });
+            rsx!(
+                button {
+                    id: "btn",
+                    onclick: move |_| dark.set(true),
+                    "dark"
+                }
+            )
+        }
+
+        let mut doc = DioxusDocument::new(VirtualDom::new(app), light_config());
+        doc.initial_build();
+        poll_until_idle(&mut doc);
+        assert_eq!(resolved_scheme(&doc), ColorScheme::Light);
+
+        click(&mut doc, "#btn");
+        assert!(doc.poll(None));
+        assert_eq!(resolved_scheme(&doc), ColorScheme::Dark);
+        poll_until_idle(&mut doc);
+    }
+
+    #[test]
+    fn scheme_set_in_initial_build_reaches_the_first_resolve() {
+        fn app() -> Element {
+            let scheme = use_context::<ColorSchemeOverride>();
+            use_hook(|| scheme.set(Some(ColorScheme::Dark)));
+            rsx!( div { "dark" } )
+        }
+
+        let mut doc = DioxusDocument::new(VirtualDom::new(app), light_config());
+        doc.initial_build();
+        assert_eq!(resolved_scheme(&doc), ColorScheme::Dark);
+        assert_eq!(
+            doc.color_scheme_override().scheme(),
+            Some(ColorScheme::Dark)
+        );
+        poll_until_idle(&mut doc);
     }
 }
