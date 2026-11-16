@@ -322,16 +322,16 @@ vello_shaders = { git = "https://github.com/jlowry-contrib/vello", rev = "0888e8
 # of jlowry-contrib/anyrender. Every anyrender crate in the graph is patched
 # from the same commit. Drop once upstream anyrender has an equivalent.
 [patch."https://github.com/DioxusLabs/anyrender"]
-anyrender = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-anyrender_serialize = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-anyrender_skia = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-anyrender_svg = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-anyrender_vello = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-anyrender_vello_cpu = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-anyrender_vello_hybrid = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-pixels_window_renderer = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-softbuffer_window_renderer = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
-wgpu_context = { git = "https://github.com/jlowry-contrib/anyrender", rev = "45e9de1f331e8c38d355267b0fa617c2653f1c85" }
+anyrender = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+anyrender_serialize = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+anyrender_skia = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+anyrender_svg = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+anyrender_vello = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+anyrender_vello_cpu = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+anyrender_vello_hybrid = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+pixels_window_renderer = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+softbuffer_window_renderer = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
+wgpu_context = { git = "https://github.com/jlowry-contrib/anyrender", rev = "f1913e68686cd1f7aef681e4da3002e630fedc18" }
 
 # [patch.crates-io]
 # anyrender = { path = "../anyrender/crates/anyrender" }
