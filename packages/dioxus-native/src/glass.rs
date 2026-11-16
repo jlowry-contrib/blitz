@@ -274,6 +274,8 @@ mod frame_hook_tests {
             frame(&mut scheduler, &mut doc, &mut renderer),
             Appearance::Light
         );
+        // A light override draws light even over a dark shell.
+        doc.inner.borrow_mut().viewport_mut().color_scheme = ColorScheme::Dark;
         scheme.set(Some(ColorScheme::Light));
         assert_eq!(
             frame(&mut scheduler, &mut doc, &mut renderer),
