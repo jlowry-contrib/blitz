@@ -3,8 +3,6 @@ use std::sync::Arc;
 use std::{any::Any, cell::RefCell};
 
 use anyrender::{CompositeAlphaMode, RenderContext, RendererConfig, WindowRenderer};
-#[cfg(feature = "vello")]
-use blitz_traits::shell::{ColorScheme, FrameTime};
 use peniko::Color;
 
 // Renderer imports
@@ -132,11 +130,15 @@ impl DioxusNativeWindowRenderer {
             glass_inputs: options.glass_inputs.unwrap_or_default(),
         }
     }
+}
 
-    /// Passes the frame's time, scale and colour scheme to the glass backend.
-    #[cfg(feature = "vello")]
-    pub(crate) fn set_frame(&mut self, time: FrameTime, scale: f64, scheme: ColorScheme) {
-        let inputs = crate::glass::frame_inputs(time.t, scale, scheme, &self.glass_inputs);
+#[cfg(feature = "vello")]
+impl crate::glass::GlassFrameTarget for DioxusNativeWindowRenderer {
+    fn glass_inputs(&self) -> &crate::GlassInputs {
+        &self.glass_inputs
+    }
+
+    fn set_glass_frame_inputs(&mut self, inputs: anyrender_vello::glass::FrameInputs) {
         self.inner.borrow_mut().set_glass_frame_inputs(inputs);
     }
 }

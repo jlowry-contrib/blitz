@@ -3,7 +3,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyrender_vello::glass::{Accessibility, AdaptStart, Appearance, FrameInputs};
-use blitz_traits::shell::ColorScheme;
+use blitz_shell::FrameHook;
+use blitz_traits::shell::{ColorScheme, FrameTime};
 
 /// A shared handle to the accessibility settings and adapt-start mode the glass backend reads.
 #[derive(Clone, Debug)]
@@ -78,6 +79,24 @@ pub(crate) fn frame_inputs(
         .with_adapt_start(inputs.adapt_start())
 }
 
+/// A renderer the glass frame hook hands each frame's inputs to.
+pub(crate) trait GlassFrameTarget {
+    /// Returns the settings the app shares with the glass backend.
+    fn glass_inputs(&self) -> &GlassInputs;
+
+    /// Takes the glass backend's inputs for the frame about to be painted.
+    fn set_glass_frame_inputs(&mut self, inputs: FrameInputs);
+}
+
+/// Returns the frame hook a dioxus-native window runs before each paint: it builds the
+/// glass inputs from the frame's time, scale and the document's colour scheme.
+pub(crate) fn glass_frame_hook<R: GlassFrameTarget>() -> FrameHook<R> {
+    Box::new(|renderer: &mut R, time: FrameTime, scale, scheme| {
+        let inputs = frame_inputs(time.t, scale, scheme, renderer.glass_inputs());
+        renderer.set_glass_frame_inputs(inputs);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +149,147 @@ mod tests {
         assert_eq!(frame.appearance, Appearance::Light);
         assert_eq!(frame.accessibility, Accessibility::new());
         assert_eq!(frame.adapt_start, AdaptStart::Live);
+    }
+}
+
+#[cfg(test)]
+mod frame_hook_tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::task::Waker;
+
+    use anyrender::{NullScenePainter, RenderContext, WindowHandle, WindowRenderer};
+    use blitz_shell::{FrameScheduler, TimeSource};
+    use blitz_traits::shell::Viewport;
+    use dioxus_core::{Element, VNode, VirtualDom, consume_context, use_hook};
+
+    use super::*;
+    use crate::{ColorSchemeOverride, DioxusDocument, DocumentConfig};
+
+    /// A renderer that paints nothing and records the glass inputs each frame hands it.
+    struct Recorder {
+        glass_inputs: GlassInputs,
+        frames: Vec<FrameInputs>,
+    }
+
+    impl RenderContext for Recorder {}
+
+    impl WindowRenderer for Recorder {
+        type ScenePainter<'a> = NullScenePainter;
+
+        fn resume<F: FnOnce() + 'static>(
+            &mut self,
+            _window: Arc<dyn WindowHandle>,
+            _width: u32,
+            _height: u32,
+            on_ready: F,
+        ) {
+            on_ready();
+        }
+
+        fn complete_resume(&mut self) -> bool {
+            true
+        }
+
+        fn suspend(&mut self) {}
+
+        fn is_active(&self) -> bool {
+            true
+        }
+
+        fn set_size(&mut self, _width: u32, _height: u32) {}
+
+        fn render<F: FnOnce(&mut Self::ScenePainter<'_>)>(&mut self, draw_fn: F) {
+            draw_fn(&mut NullScenePainter::new());
+        }
+    }
+
+    impl GlassFrameTarget for Recorder {
+        fn glass_inputs(&self) -> &GlassInputs {
+            &self.glass_inputs
+        }
+
+        fn set_glass_frame_inputs(&mut self, inputs: FrameInputs) {
+            self.frames.push(inputs);
+        }
+    }
+
+    /// Where the app leaves the colour scheme handle it took from its context.
+    #[derive(Clone, Default)]
+    struct Slot(Rc<RefCell<Option<ColorSchemeOverride>>>);
+
+    fn app() -> Element {
+        use_hook(|| {
+            let slot = consume_context::<Slot>();
+            *slot.0.borrow_mut() = Some(consume_context::<ColorSchemeOverride>());
+        });
+        VNode::empty()
+    }
+
+    /// Runs one frame and returns the appearance the frame hook handed the renderer.
+    fn frame(
+        scheduler: &mut FrameScheduler<DioxusDocument, Recorder>,
+        doc: &mut DioxusDocument,
+        renderer: &mut Recorder,
+    ) -> Appearance {
+        let before = renderer.frames.len();
+        scheduler.frame(doc, renderer, true, |_, _| {});
+        assert_eq!(renderer.frames.len(), before + 1, "the frame hook ran");
+        renderer.frames[before].appearance
+    }
+
+    #[test]
+    fn the_frame_hook_draws_the_scheme_app_code_sets() {
+        let slot = Slot::default();
+        let vdom = VirtualDom::new(app).with_root_context(slot.clone());
+        let mut doc = DioxusDocument::new(
+            vdom,
+            DocumentConfig {
+                viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+                ..Default::default()
+            },
+        );
+        doc.initial_build();
+        let scheme = slot.0.borrow().clone().expect("the app mounted");
+        let mut scheduler = FrameScheduler::new(TimeSource::Manual);
+        scheduler.set_frame_hook(Some(glass_frame_hook()));
+        scheduler.set_waker(Some(Waker::noop().clone()));
+        let mut renderer = Recorder {
+            glass_inputs: GlassInputs::new(),
+            frames: Vec::new(),
+        };
+
+        assert_eq!(
+            frame(&mut scheduler, &mut doc, &mut renderer),
+            Appearance::Light
+        );
+        scheme.set(Some(ColorScheme::Dark));
+        assert_eq!(
+            frame(&mut scheduler, &mut doc, &mut renderer),
+            Appearance::Dark
+        );
+        scheme.set(None);
+        assert_eq!(
+            frame(&mut scheduler, &mut doc, &mut renderer),
+            Appearance::Light
+        );
+        scheme.set(Some(ColorScheme::Light));
+        assert_eq!(
+            frame(&mut scheduler, &mut doc, &mut renderer),
+            Appearance::Light
+        );
+
+        // The shell's theme changes under a dark override, as `ThemeChanged` writes it.
+        scheme.set(Some(ColorScheme::Dark));
+        assert_eq!(
+            frame(&mut scheduler, &mut doc, &mut renderer),
+            Appearance::Dark
+        );
+        doc.inner.borrow_mut().viewport_mut().color_scheme = ColorScheme::Light;
+        assert_eq!(
+            frame(&mut scheduler, &mut doc, &mut renderer),
+            Appearance::Dark
+        );
     }
 }

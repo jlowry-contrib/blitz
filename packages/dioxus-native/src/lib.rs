@@ -274,11 +274,7 @@ pub fn launch_cfg_with_props<P: Clone + 'static, M: 'static>(
             .with_time_source(config.time_source)
             .with_safe_area(config.safe_area);
     #[cfg(feature = "vello")]
-    let config = config.with_frame_hook(Box::new(
-        |renderer: &mut DioxusNativeWindowRenderer, time, scale, scheme| {
-            renderer.set_frame(time, scale, scheme)
-        },
-    ));
+    let config = config.with_frame_hook(glass::glass_frame_hook());
 
     // Create application
     #[allow(unused_mut)]
