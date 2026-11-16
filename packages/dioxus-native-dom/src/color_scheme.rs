@@ -1,6 +1,6 @@
 //! A handle through which app code sets the document's colour scheme.
 use blitz_traits::shell::ColorScheme;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::fmt;
 use std::rc::Rc;
 use std::task::Waker;
@@ -23,7 +23,11 @@ struct Pending {
     scheme: Cell<Option<ColorScheme>>,
     dirty: Cell<bool>,
     /// The waker the document was last polled with, which a set wakes.
-    waker: RefCell<Option<Waker>>,
+    ///
+    /// A `Cell`, not a `RefCell`: the waker is the poller's and may poll the
+    /// document inline, so no borrow may be held while it is cloned, dropped
+    /// or woken.
+    waker: Cell<Option<Waker>>,
 }
 
 impl ColorSchemeOverride {
@@ -31,8 +35,11 @@ impl ColorSchemeOverride {
     pub fn set(&self, scheme: Option<ColorScheme>) {
         self.inner.scheme.set(scheme);
         self.inner.dirty.set(true);
-        if let Some(waker) = &*self.inner.waker.borrow() {
+        if let Some(waker) = self.inner.waker.take() {
             waker.wake_by_ref();
+            // A poll inside the wake keeps its own waker; ours goes back only if none did.
+            let registered = self.inner.waker.take();
+            self.inner.waker.set(registered.or(Some(waker)));
         }
     }
 
@@ -51,10 +58,11 @@ impl ColorSchemeOverride {
 
     /// Keeps `waker`, the one the document is being polled with, for the next set to wake.
     pub(crate) fn register_waker(&self, waker: &Waker) {
-        let mut kept = self.inner.waker.borrow_mut();
-        if !kept.as_ref().is_some_and(|kept| kept.will_wake(waker)) {
-            *kept = Some(waker.clone());
-        }
+        let kept = match self.inner.waker.take() {
+            Some(kept) if kept.will_wake(waker) => kept,
+            _ => waker.clone(),
+        };
+        self.inner.waker.set(Some(kept));
     }
 }
 

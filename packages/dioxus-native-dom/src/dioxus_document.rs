@@ -1175,6 +1175,52 @@ mod tests {
     }
 
     #[test]
+    fn a_waker_that_polls_inline_does_not_panic() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // `Wake` needs `Send + Sync`, which the document isn't, so the waker
+        // reaches it through a thread-local on the test's own thread.
+        thread_local! {
+            static DOC: RefCell<Option<DioxusDocument>> = const { RefCell::new(None) };
+        }
+        struct PollInline(AtomicBool);
+        impl std::task::Wake for PollInline {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                let waker = Waker::from(Arc::clone(self));
+                DOC.with(|doc| {
+                    if let Some(doc) = doc.borrow_mut().as_mut() {
+                        doc.poll(Some(TaskContext::from_waker(&waker)));
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                });
+            }
+        }
+
+        fn app() -> Element {
+            rsx!(div {})
+        }
+
+        let mut doc = DioxusDocument::new(VirtualDom::new(app), light_config());
+        doc.initial_build();
+        poll_until_idle(&mut doc);
+        let polled = Arc::new(PollInline(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&polled));
+        doc.poll(Some(TaskContext::from_waker(&waker)));
+        let scheme = doc.color_scheme_override().clone();
+        DOC.with(|slot| *slot.borrow_mut() = Some(doc));
+
+        scheme.set(Some(ColorScheme::Dark));
+
+        let doc = DOC.with(|slot| slot.borrow_mut().take()).unwrap();
+        assert!(polled.0.load(Ordering::SeqCst));
+        assert_eq!(resolved_scheme(&doc), ColorScheme::Dark);
+    }
+
+    #[test]
     fn scheme_set_in_initial_build_reaches_the_first_resolve() {
         fn app() -> Element {
             let scheme = use_context::<ColorSchemeOverride>();
