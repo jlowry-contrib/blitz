@@ -191,6 +191,11 @@ impl DioxusDocument {
     }
 
     /// Sets the document's colour scheme at once, as app code would through the handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the [`BaseDocument`] is already borrowed, as it is while an event handler
+    /// runs; app code there sets the scheme through [`ColorSchemeOverride`] instead.
     pub fn set_color_scheme(&mut self, scheme: Option<ColorScheme>) {
         self.color_scheme.set(scheme);
         self.apply_color_scheme();
@@ -383,6 +388,9 @@ impl Document for DioxusDocument {
             .as_ref()
             .map(|cx| cx.waker().clone())
             .unwrap_or_else(|| NOOP_WAKER.clone());
+        if let Some(cx) = &cx {
+            self.color_scheme.register_waker(cx.waker());
+        }
 
         // Poll any sub-documents, which may have pending async operations of
         // their own (e.g. JavaScript timers)
@@ -1135,6 +1143,35 @@ mod tests {
         assert!(doc.poll(None));
         assert_eq!(resolved_scheme(&doc), ColorScheme::Dark);
         poll_until_idle(&mut doc);
+    }
+
+    #[test]
+    fn a_set_wakes_the_document_that_last_polled() {
+        struct Count(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for Count {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        fn app() -> Element {
+            rsx!(div {})
+        }
+
+        let mut doc = DioxusDocument::new(VirtualDom::new(app), light_config());
+        doc.initial_build();
+        let count = std::sync::Arc::new(Count(Default::default()));
+        let waker = Waker::from(std::sync::Arc::clone(&count));
+        doc.poll(Some(TaskContext::from_waker(&waker)));
+        let before = count.0.load(std::sync::atomic::Ordering::SeqCst);
+
+        doc.color_scheme_override().set(Some(ColorScheme::Dark));
+        assert!(count.0.load(std::sync::atomic::Ordering::SeqCst) > before);
+        assert!(doc.poll(Some(TaskContext::from_waker(&waker))));
+        assert_eq!(resolved_scheme(&doc), ColorScheme::Dark);
     }
 
     #[test]
