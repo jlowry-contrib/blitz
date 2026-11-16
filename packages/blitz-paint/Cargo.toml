@@ -46,3 +46,7 @@ kurbo = { workspace = true }
 bytemuck = { workspace = true }
 smallvec = { workspace = true }
 tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Styles a document for the unit tests.
+blitz-html = { workspace = true }

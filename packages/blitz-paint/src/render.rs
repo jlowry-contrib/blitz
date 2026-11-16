@@ -632,19 +632,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     /// paints after that glass, so it isn't such a layer.
     fn layers_own_glass(&self, styles: &ComputedValues, clip_shapes: bool) -> bool {
         use style::computed_values::position::T as Position;
-        use style::values::computed::basic_shape::ClipPath;
         use style::values::generics::ClipRectOrAuto;
-        use style::values::generics::image::GenericImage;
 
         let effects = styles.get_effects();
-        // The tests of `Node::applies_atomic_paint_effect`, which counts every clip-path.
-        let clip_layer = !clip_shapes && !matches!(styles.get_clip_path(), ClipPath::None);
-        let mask = (styles.get_svg().mask_image.0.iter())
-            .any(|image| !matches!(image, GenericImage::None));
-        effects.opacity != 1.0
-            || !effects.filter.0.is_empty()
-            || clip_layer
-            || mask
+        atomic_layer(styles, clip_shapes)
             || styles.get_box().isolation == Isolation::Isolate
             || convert_blend_mode(effects.mix_blend_mode) != BlendMode::default()
             || (matches!(
@@ -1420,6 +1411,20 @@ struct GlassGroups {
     own_outside_clip: bool,
 }
 
+/// Whether `styles` push a layer for opacity, a filter, a clip-path or a mask, as
+/// [`Node::applies_atomic_paint_effect`] does, except for a clip-path that shapes the glass,
+/// `clip_shapes`.
+fn atomic_layer(styles: &ComputedValues, clip_shapes: bool) -> bool {
+    use style::values::computed::basic_shape::ClipPath;
+    use style::values::generics::image::GenericImage;
+
+    let effects = styles.get_effects();
+    let clip_layer = !clip_shapes && !matches!(styles.get_clip_path(), ClipPath::None);
+    let mask =
+        (styles.get_svg().mask_image.0.iter()).any(|image| !matches!(image, GenericImage::None));
+    effects.opacity != 1.0 || !effects.filter.0.is_empty() || clip_layer || mask
+}
+
 /// The group of `members`, in order, with every pair that shares a union; `None` when empty.
 fn group_of(
     members: Vec<(GlassShape, Option<style::Atom>)>,
@@ -2120,4 +2125,44 @@ fn create_css_rect(
 
     CssBox::new(border_box, border, padding, outline_width, border_radii)
         .with_corner_curves(corner_curves)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atomic_layer;
+    use blitz_dom::DocumentConfig;
+    use blitz_html::HtmlDocument;
+
+    #[test]
+    fn atomic_layer_agrees_with_atomic_paint_effects() {
+        let styles = [
+            "",
+            "opacity:1",
+            "opacity:0.5",
+            "filter:blur(1px)",
+            "clip-path:circle(closest-side)",
+            "clip-path:inset(0)",
+            "mask-image:linear-gradient(black, transparent)",
+            "isolation:isolate",
+            "background:red",
+        ];
+        let body: String = (styles.iter().enumerate())
+            .map(|(i, style)| format!("<div id='n{i}' style='{style}'></div>"))
+            .collect();
+        let mut doc = HtmlDocument::from_html(
+            &format!("<html><body>{body}</body></html>"),
+            DocumentConfig::default(),
+        );
+        doc.resolve(0.0);
+        for (i, style) in styles.iter().enumerate() {
+            let id = doc.query_selector(&format!("#n{i}")).unwrap().unwrap();
+            let node = doc.get_node(id).unwrap();
+            let computed = node.primary_styles().unwrap();
+            assert_eq!(
+                atomic_layer(&computed, false),
+                node.applies_atomic_paint_effect(),
+                "{style}"
+            );
+        }
+    }
 }
