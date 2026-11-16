@@ -2313,6 +2313,11 @@ impl BaseDocument {
         self.color_scheme_override
     }
 
+    /// Returns the colour scheme the shell last reported, whatever the override.
+    pub fn shell_color_scheme(&self) -> ColorScheme {
+        self.shell_color_scheme
+    }
+
     pub(crate) fn effective_color_scheme(&self) -> ColorScheme {
         self.color_scheme_override
             .unwrap_or(self.shell_color_scheme)
@@ -3258,6 +3263,18 @@ mod color_scheme_override_tests {
         assert_eq!(doc.viewport().color_scheme, ColorScheme::Dark);
         assert_eq!(doc.viewport().window_size, (640, 480));
         assert_eq!(doc.color_scheme_override(), Some(ColorScheme::Dark));
+    }
+
+    #[test]
+    fn shell_scheme_is_kept_apart_from_the_override() {
+        let mut doc = doc(ColorScheme::Light);
+        doc.set_color_scheme_override(Some(ColorScheme::Dark));
+        assert_eq!(doc.shell_color_scheme(), ColorScheme::Light);
+
+        doc.viewport_mut().color_scheme = ColorScheme::Dark;
+        doc.set_color_scheme_override(Some(ColorScheme::Light));
+        assert_eq!(doc.shell_color_scheme(), ColorScheme::Dark);
+        assert_eq!(doc.viewport().color_scheme, ColorScheme::Light);
     }
 
     #[test]

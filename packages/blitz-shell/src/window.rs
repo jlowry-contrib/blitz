@@ -351,7 +351,9 @@ impl<Rend: WindowRenderer> View<Rend> {
     pub fn replace_document(&mut self, new_doc: Box<dyn Document>, retain_scroll_position: bool) {
         let inner = self.doc.inner();
         let scroll = inner.viewport_scroll();
-        let viewport = inner.viewport().clone();
+        // The new document gets the shell's scheme, not the old one's override.
+        let mut viewport = inner.viewport().clone();
+        viewport.color_scheme = inner.shell_color_scheme();
         let safe_area_insets = inner.safe_area_insets();
         let shell_provider = inner.shell_provider.clone();
         drop(inner);
