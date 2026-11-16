@@ -199,17 +199,37 @@ impl<D: Document> Harness<D> {
         pixels
     }
 
-    /// Resize the viewport, keeping the current scale and color scheme
+    /// Resize the viewport, keeping the current scale, the shell's color scheme and any
+    /// color scheme override
     pub fn set_viewport_size(&mut self, width: u32, height: u32) {
         let mut doc = self.doc.inner_mut();
         let viewport = doc.get_viewport();
+        let shell_scheme = doc.shell_color_scheme();
         doc.set_viewport(Viewport::new(
             width,
             height,
             viewport.hidpi_scale,
-            viewport.color_scheme,
+            shell_scheme,
         ));
         drop(doc);
         self.pump();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resizing_keeps_the_shell_scheme_apart_from_the_override() {
+        let mut harness = Harness::from_html("<html><body></body></html>");
+        harness
+            .base_mut()
+            .set_color_scheme_override(Some(ColorScheme::Dark));
+        harness.set_viewport_size(400, 300);
+        assert_eq!(harness.base().viewport().color_scheme, ColorScheme::Dark);
+
+        harness.base_mut().set_color_scheme_override(None);
+        assert_eq!(harness.base().viewport().color_scheme, ColorScheme::Light);
     }
 }
