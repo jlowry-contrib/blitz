@@ -1152,6 +1152,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let glass = if self.glass_collected.borrow().contains(&node_id) {
             GlassGroups {
                 draws_own: true,
+                // Collection already checked that the clip-path, if any, shapes the glass.
+                own_outside_clip: has_clip_path,
                 ..GlassGroups::default()
             }
         } else if in_portal {
@@ -1412,8 +1414,9 @@ struct GlassGroups {
     draws_own: bool,
     /// The portal source re-painted under `own`, for a lone glass element.
     portal: Option<NodeId>,
-    /// Whether `own` is a lone element's glass shaped by its clip-path, which then clips only
-    /// what the element paints after it.
+    /// Whether the element's own glass, drawn as `own` or in its container's group, takes its
+    /// shape from the element's clip-path, which then clips only what the element paints
+    /// after that glass.
     own_outside_clip: bool,
 }
 
@@ -1490,7 +1493,6 @@ struct ElementCx<'dom, 'a> {
     text_input: Option<&'dom TextInputData>,
     list_item: Option<&'dom ListItemLayout>,
     devtools: &'dom DevtoolSettings,
-    #[cfg_attr(not(feature = "custom-widget"), expect(unused))]
     custom_widget_scene: Option<&'a Scene>,
 }
 
@@ -1524,6 +1526,7 @@ impl ElementCx<'_, '_> {
             && matches!(self.element.special_data, SpecialElementData::None)
             && self.list_item.is_none()
             && !self.devtools.show_layout
+            && self.custom_widget_scene.is_none()
             && background_color == Color::TRANSPARENT
             && (background.background_image.0.iter())
                 .all(|image| matches!(image, GenericImage::None))

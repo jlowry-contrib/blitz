@@ -1261,16 +1261,6 @@ fn clip_path_glass_shadow_is_not_clipped() {
 
 #[test]
 fn clip_path_glass_with_nothing_after_it_pushes_no_clip() {
-    let pushes = |scene: &Scene| {
-        (scene.commands.iter())
-            .filter(|cmd| {
-                matches!(
-                    cmd,
-                    RenderCommand::PushLayer(_) | RenderCommand::PushClipLayer(_)
-                )
-            })
-            .count()
-    };
     let bare = |extra: &str| {
         scene_for(&format!(
             "<div style='width:100px; height:40px; --glass:regular; {extra}'></div>"
@@ -1282,6 +1272,37 @@ fn clip_path_glass_with_nothing_after_it_pushes_no_clip() {
         assert_eq!(groups(&scene).len(), 1, "{clip}");
         assert_eq!(pushes(&scene), plain, "{clip}: {:#?}", scene.commands);
     }
+}
+
+#[test]
+fn clip_path_member_with_nothing_after_it_pushes_no_clip() {
+    let container = |extra: &str| {
+        scene_for(&format!(
+            "<div style='--glass-container:4px; display:flex'>{}\
+             <div style='width:100px; height:40px; --glass:regular; {extra}'></div></div>",
+            glass_box(40, "", "0000ff"),
+        ))
+    };
+    let plain = pushes(&container(""));
+    for clip in ["clip-path:circle(closest-side)", TRIANGLE] {
+        let scene = container(clip);
+        let groups = groups(&scene);
+        assert_eq!(groups.len(), 1, "{clip}");
+        assert_eq!(groups[0].shapes.len(), 2, "{clip}");
+        assert_eq!(pushes(&scene), plain, "{clip}: {:#?}", scene.commands);
+    }
+}
+
+/// How many layers the scene pushes.
+fn pushes(scene: &Scene) -> usize {
+    (scene.commands.iter())
+        .filter(|cmd| {
+            matches!(
+                cmd,
+                RenderCommand::PushLayer(_) | RenderCommand::PushClipLayer(_)
+            )
+        })
+        .count()
 }
 
 #[test]
